@@ -274,11 +274,23 @@ namespace XCode
             return rs;
         }
 
-        /// <summary>把整个集合从数据库中删除</summary>
+        /// <summary>把整个集合调用对应 Delete()</summary>
         /// <param name="list">实体列表</param>
         /// <param name="useTransition">是否使用事务保护</param>
         /// <returns></returns>
         public static Int32 Delete<T>(this IEnumerable<T> list, Boolean? useTransition = null) where T : IEntity
+        {
+            // 避免列表内实体对象为空
+            var entity = list.FirstOrDefault(e => e != null);
+            if (entity == null) return 0;
+            return DoAction(list, useTransition, e => e.Delete());
+        }
+
+        /// <summary>把整个集合从数据库中删除</summary>
+        /// <param name="list">实体列表</param>
+        /// <param name="useTransition">是否使用事务保护</param>
+        /// <returns></returns>
+        public static Int32 BatchDelete<T>(this IEnumerable<T> list, Boolean? useTransition = null) where T : IEntity
         {
             // 避免列表内实体对象为空
             var entity = list.FirstOrDefault(e => e != null);
