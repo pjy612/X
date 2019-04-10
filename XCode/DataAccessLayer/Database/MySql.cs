@@ -536,20 +536,44 @@ namespace XCode.DataAccessLayer
                 foreach (var dr2 in dis)
                 {
                     var dname = dr2["Key_name"] + "";
+                    var cname = dr2.Get<String>("Column_name");
+
                     var di = table.Indexes.FirstOrDefault(e => e.Name == dname) ?? table.CreateIndex();
+                    if (di.Name.IsNullOrWhiteSpace())
+                    {
+                        table.Indexes.Add(di);
+                    }
                     di.Name = dname;
                     di.Unique = dr2.Get<Int32>("Non_unique") == 0;
 
-                    var cname = dr2.Get<String>("Column_name");
+                   
                     var cs = new List<String>();
                     if (di.Columns != null && di.Columns.Length > 0) cs.AddRange(di.Columns);
                     cs.Add(cname);
                     di.Columns = cs.ToArray();
-
-                    table.Indexes.Add(di);
+                    //table.Indexes.Add(di);
                 }
                 #endregion
-
+                
+//                List<IDataIndex> indices = table.Indexes.Where(r => !r.Unique && r.Columns.Length > 1).ToList();
+//                if (indices.Any())
+//                {
+//                    indices.ForEach(index =>
+//                    {
+//                        foreach (String column in index.Columns)
+//                        {
+//                            if (!table.Indexes.Exists(r => r.Columns.Length == 1 && (r.Columns.Contains(column) || r.Name == $"idx_{column}")))
+//                            {
+//                                IDataIndex di = table.CreateIndex();
+//                                di.Unique  = false;
+//                                di.Name    = $"idx_{column}";
+//                                di.Columns = new[] { column };
+//                                table.Indexes.Add(di);
+//                            }
+//                        }
+//                    });
+//                }
+//               
                 // 修正关系数据
                 table.Fix();
 

@@ -285,6 +285,10 @@ namespace NewLife.Collections
                 cache[item.Key] = item.Value.Visit();
             }
         }
+        /// <summary>
+        /// 所有Key的集合
+        /// </summary>
+        public List<TKey> Keys => _cache.Keys.ToList();
         #endregion
 
         #region 清理过期缓存

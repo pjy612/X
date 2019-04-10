@@ -78,9 +78,9 @@ namespace XCode.Membership
 
         /// <summary>验证</summary>
         /// <param name="isNew"></param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
-            base.Valid(isNew);
+            base.OnValid(isNew);
 
             if (Name.IsNullOrEmpty()) throw new ArgumentNullException(__.Name, "用户名不能为空！");
             //if (RoleID < 1) throw new ArgumentNullException(__.RoleID, "没有指定角色！");

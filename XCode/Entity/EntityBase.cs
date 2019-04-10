@@ -61,7 +61,7 @@ namespace XCode
         /// <summary>验证数据，通过抛出异常的方式提示验证失败。</summary>
         /// <remarks>建议重写者调用基类的实现，因为基类根据数据字段的唯一索引进行数据验证。</remarks>
         /// <param name="isNew">是否新数据</param>
-        public abstract void Valid(Boolean isNew);
+        public abstract void OnValid(Boolean isNew);
         #endregion
 
         #region 获取/设置 字段值

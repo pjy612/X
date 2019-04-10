@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -21,18 +21,18 @@ using XCode.Configuration;
 using XCode.DataAccessLayer;
 using XCode.Membership;
 
-namespace XCode.Membership
+namespace NewLifeTest.Model
 {
-    /// <summary>部门</summary>
+    /// <summary>菜单</summary>
     [Serializable]
     [ModelCheckMode(ModelCheckModes.CheckTableWhenFirstUse)]
-    public class Department : Department<Department> { }
+    public class Menu : Menu<Menu> { }
 
-    /// <summary>部门。组织机构，多级树状结构</summary>
-    public partial class Department<TEntity> : EntityTree<TEntity> where TEntity : Department<TEntity>, new()
+    /// <summary>菜单</summary>
+    public partial class Menu<TEntity> : Entity<TEntity> where TEntity : Menu<TEntity>, new()
     {
         #region 对象操作
-        static Department()
+        static Menu()
         {
             // 用于引发基类的静态构造函数，所有层次的泛型实体类都应该有一个
             var entity = new TEntity();
@@ -42,64 +42,64 @@ namespace XCode.Membership
             //df.Add(__.ParentID);
 
             // 过滤器 UserModule、TimeModule、IPModule
-            Meta.Modules.Add<UserModule>();
-            Meta.Modules.Add<TimeModule>();
-            Meta.Modules.Add<IPModule>();
         }
 
         /// <summary>验证数据，通过抛出异常的方式提示验证失败。</summary>
         /// <param name="isNew">是否插入</param>
-        public override void OnValid(Boolean isNew)
+        public override void Valid(Boolean isNew)
         {
             // 如果没有脏数据，则不需要进行任何处理
             if (!HasDirty) return;
 
             // 这里验证参数范围，建议抛出参数异常，指定参数名，前端用户界面可以捕获参数异常并聚焦到对应的参数输入框
             if (Name.IsNullOrEmpty()) throw new ArgumentNullException(nameof(Name), "名称不能为空！");
+
+            // 在新插入数据或者修改了指定字段时进行修正
+
+            // 检查唯一索引
+            // CheckExist(isNew, __.Name, __.ParentID);
         }
 
-        /// <summary>首次连接数据库时初始化数据，仅用于实体类重载，用户不应该调用该方法</summary>
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        internal protected override void InitData()
-        {
-            base.InitData();
+        ///// <summary>首次连接数据库时初始化数据，仅用于实体类重载，用户不应该调用该方法</summary>
+        //[EditorBrowsable(EditorBrowsableState.Never)]
+        //protected override void InitData()
+        //{
+        //    // InitData一般用于当数据表没有数据时添加一些默认数据，该实体类的任何第一次数据库操作都会触发该方法，默认异步调用
+        //    if (Meta.Session.Count > 0) return;
 
-            if (Meta.Count > 0) return;
+        //    if (XTrace.Debug) XTrace.WriteLine("开始初始化TEntity[菜单]数据……");
 
-            if (XTrace.Debug) XTrace.WriteLine("开始初始化{0}数据……", typeof(TEntity).Name);
+        //    var entity = new TEntity();
+        //    entity.ID = 0;
+        //    entity.Name = "abc";
+        //    entity.DisplayName = "abc";
+        //    entity.FullName = "abc";
+        //    entity.ParentID = 0;
+        //    entity.Url = "abc";
+        //    entity.Sort = 0;
+        //    entity.Icon = "abc";
+        //    entity.Visible = true;
+        //    entity.Necessary = true;
+        //    entity.Permission = "abc";
+        //    entity.Remark = "abc";
+        //    entity.Insert();
 
-            var root = Add("总公司", "001", 0);
-            Add("行政部", "011", root.ID);
-            Add("技术部", "012", root.ID);
-            Add("生产部", "013", root.ID);
+        //    if (XTrace.Debug) XTrace.WriteLine("完成初始化TEntity[菜单]数据！");
+        //}
 
-            root = Add("上海分公司", "101", 0);
-            Add("行政部", "111", root.ID);
-            Add("市场部", "112", root.ID);
+        ///// <summary>已重载。基类先调用Valid(true)验证数据，然后在事务保护内调用OnInsert</summary>
+        ///// <returns></returns>
+        //public override Int32 Insert()
+        //{
+        //    return base.Insert();
+        //}
 
-            if (XTrace.Debug) XTrace.WriteLine("完成初始化{0}数据！", typeof(TEntity).Name);
-        }
-
-        /// <summary>添加用户，如果存在则直接返回</summary>
-        /// <param name="name"></param>
-        /// <param name="code"></param>
-        /// <param name="parentid"></param>
-        /// <returns></returns>
-        public static TEntity Add(String name, String code, Int32 parentid)
-        {
-            var entity = new TEntity
-            {
-                Name = name,
-                Code = code,
-                ParentID = parentid,
-                Enable = true,
-                Visible = true,
-            };
-
-            entity.Save();
-
-            return entity;
-        }
+        ///// <summary>已重载。在事务保护范围内处理业务，位于Valid之后</summary>
+        ///// <returns></returns>
+        //protected override Int32 OnDelete()
+        //{
+        //    return base.OnDelete();
+        //}
         #endregion
 
         #region 扩展属性
@@ -133,9 +133,9 @@ namespace XCode.Membership
             return FindAll(_.Name == name);
         }
 
-        /// <summary>根据名称、父级查找</summary>
+        /// <summary>根据名称、父编号查找</summary>
         /// <param name="name">名称</param>
-        /// <param name="parentid">父级</param>
+        /// <param name="parentid">父编号</param>
         /// <returns>实体对象</returns>
         public static TEntity FindByNameAndParentID(String name, Int32 parentid)
         {
@@ -143,17 +143,6 @@ namespace XCode.Membership
             if (Meta.Session.Count < 1000) return Meta.Cache.Find(e => e.Name == name && e.ParentID == parentid);
 
             return Find(_.Name == name & _.ParentID == parentid);
-        }
-
-        /// <summary>根据代码查找</summary>
-        /// <param name="code">代码</param>
-        /// <returns>实体对象</returns>
-        public static TEntity FindByCode(String code)
-        {
-            // 实体缓存
-            if (Meta.Session.Count < 1000) return Meta.Cache.Find(e => e.Code == code);
-
-            return Find(_.Code == code);
         }
         #endregion
 

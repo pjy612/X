@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using XCode.Configuration;
+using XCode.DataAccessLayer;
 
 namespace XCode
 {
@@ -34,8 +35,8 @@ namespace XCode
             {
                 case TypeCode.DateTime:
                     {
-                        var d1 = (DateTime)v1;
-                        var d2 = (DateTime)v2;
+                        DateTime.TryParse(v1.ToString(), out var d1);
+                        DateTime.TryParse(v2.ToString(), out var d2);
 
                         // 时间存储包括年月日时分秒，后面还有微秒，而我们数据库存储默认不需要微秒，所以时间的相等判断需要做特殊处理
                         return d1.Date == d2.Date &&

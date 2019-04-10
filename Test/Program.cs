@@ -34,7 +34,7 @@ namespace Test
                 try
                 {
 #endif
-                Test8();
+                Test21();
 #if !DEBUG
                 }
                 catch (Exception ex)
@@ -51,6 +51,92 @@ namespace Test
                 var key = Console.ReadKey(true);
                 if (key.Key != ConsoleKey.C) break;
             }
+        }
+
+        private static void Test21()
+        {
+            DbCache dbCache = new DbCache(MyDbCache.Meta.Factory, MyDbCache.__.Group, MyDbCache.__.Name, MyDbCache.__.ExpiredTime);
+            MyDbCache.Meta.Factory.Session.Dal.Db.ShowSQL = true;
+            IList<UserX> list = dbCache.GetGroup<UserX>("UserX");
+            IList<UserX> list1 = dbCache.GetGroup<UserX>("UserX1");
+            IList<String> @group = dbCache.GetGroup<string>("UserX");
+            //            dbCache.RemoveGroup("UserX");
+            //            dbCache.RemoveGroup("UserX1");
+            list = new List<UserX>()
+            {
+                new UserX(){
+                    ID     = 1,
+                    Name   = "aaa",
+                    Avatar = "aaa1"
+                },new UserX(){
+                    ID     = 1,
+                    Name   = "aaa",
+                    Avatar = "aaa2"
+                },new UserX(){
+                    ID     = 1,
+                    Name   = "aaa",
+                    Avatar = "aaa3"
+                },
+                new UserX(){
+                    ID     = 2,
+                    Name   = "bbb",
+                    Avatar = "bbb1"
+                },
+            };
+            dbCache.AddGroup("UserX", list, x => x.ID, 100);
+
+            dbCache.AddGroup("UserX1", list, x => x.ID, 100);
+            dbCache.Remove("UserX", new[] { "1" });
+            dbCache.SetGroup("UserX", list, x => x.ID, 100);
+            dbCache.SetGroup("UserX1", list, x => x.ID, 100);
+            IList<Int32> ints = dbCache.GetGroup<int>("UserX");
+            dbCache["ttt##1"] = new MyDbCache() { Group = "ttt", Name = "1", Value = "aaa", CreateTime = DateTime.Now, ExpiredTime = DateTime.Now.AddMinutes(5) };
+            dbCache.RemoveGroup("UserX1");
+            dbCache.Add("bbb", "2", new UserX()
+            {
+                ID = 2,
+                Name = "bbb",
+                Avatar = "bbb1"
+            }, TimeSpan.FromMinutes(5));
+            Console.Read();
+            dbCache.GetGroup<UserX>("bbb");
+            dbCache.AddGroup("ttt", new[] { "a_1", "b_2", "c_3" }, x => x.Split("_")[0], 100);
+            IList<String> group1 = dbCache.GetGroup<string>("ttt");
+
+            dbCache.AddGroup("ddd", new[] { 1001, 2002, 3003 }, x => x.ToString()[0], 1000);
+            IList<int> group2 = dbCache.GetGroup<int>("ddd");
+
+            List<Int32> limit = Enumerable.Range(1, 1000).ToList();
+            for (int i = 1; i <= 10; i++)
+            {
+                string gpk = $"Group_{i}";
+                List<UserX> teamUsers = limit.AsParallel().Select(r => new UserX()
+                {
+                    ID = r,
+                    Name = $"User_{r}",
+                }).ToList();
+                dbCache.SetGroup(gpk, teamUsers, x => x.ID, 10);
+            }
+            Task.Run(() =>
+            {
+                int i = 0;
+                while (true)
+                {
+                    Console.WriteLine($"{i}:{dbCache.Count}");
+                    Thread.Sleep(1000);
+                    i++;
+                }
+            });
+            Console.WriteLine("1111:"+Console.ReadLine());
+            Console.WriteLine("2222:"+Console.ReadLine());
+            Console.WriteLine("3333:"+Console.ReadLine());
+        }
+
+        private static void Test20()
+        {
+            DAL.AddConnStr("MuchNewDb", "Data Source=DBStage1.tutorabc.com;Initial Catalog=muchnewdb;User ID=VipjrMemberApiAcct;Password=Vede2EchUB5#;", null, "sqlserver");
+            DAL dal = DAL.Create("MuchNewDb");
+            List<IDataTable> dataTables = dal.Tables;
         }
 
         static void Test1()
@@ -119,6 +205,7 @@ namespace Test
             //DAL.AddConnStr("Log", @"Server=.\JSQL2008;User ID=sa;Password=sa;Database=Log;", null, "sqlserver");
 
             var gs = UserX.FindAll(null, null, null, 0, 10);
+            Console.WriteLine(gs.First().Logins);
             var count = UserX.FindCount();
             Console.WriteLine("Count={0}", count);
 

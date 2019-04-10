@@ -261,6 +261,11 @@ namespace XCode.Code
         /// <summary>输出目录</summary>
         public String Output { get; set; }
 
+        /// <summary>
+        /// 使用 UseDisplayName
+        /// </summary>
+        public Boolean UseDisplayName { get; set; } = false;
+
         /// <summary>保存文件，返回文件路径</summary>
         public virtual String Save(String ext = null, Boolean overwrite = true)
         {
@@ -272,7 +277,7 @@ namespace XCode.Code
 
             if (Interface)
                 p = p.CombinePath("I" + Table.Name + ext);
-            else if (!Table.DisplayName.IsNullOrEmpty())
+            else if (!Table.DisplayName.IsNullOrEmpty() && UseDisplayName)
                 p = p.CombinePath(Table.DisplayName + ext);
             else
                 p = p.CombinePath(Table.Name + ext);

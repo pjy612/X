@@ -77,7 +77,7 @@ namespace XCode.DataAccessLayer
                 }
                 name = sb.Put(true);
             }
-            else if (name != "ID" && name.Length > 2 && (name == name.ToUpper() || name == name.ToLower()))
+            else if (name != "ID" && name.Length >= 2 && (name == name.ToUpper() || name == name.ToLower()))
             {
                 name = name.Substring(0, 1).ToUpper() + name.Substring(1).ToLower();
             }
@@ -150,6 +150,15 @@ namespace XCode.DataAccessLayer
             if (!table.TableName.IsNullOrEmpty()) table.TableName = table.TableName.Trim();
             if (table.Name.IsNullOrEmpty()) table.Name = GetName(table.TableName);
             if (!table.Name.IsNullOrEmpty()) table.Name = table.Name.Trim();
+
+            //sqlServer 特殊处理 Schema
+            if (table.DbType == DatabaseType.SqlServer)
+            {
+                if (!table.Schema.IsNullOrWhiteSpace() && !table.TableName.StartsWith(table.Schema))
+                {
+                    table.TableName = $"{table.Schema}.{table.TableName}";
+                }
+            }
 
             // 去除字段名两端的空格
             foreach (var item in table.Columns)

@@ -38,6 +38,12 @@ namespace XCode.DataAccessLayer
         [Description("表名")]
         public String TableName { get; set; }
 
+        /// <summary>SqlServer 所属</summary>
+        [XmlAttribute]
+        [DisplayName("MSSQL所属")]
+        [Description("MSSQL所属")]
+        public string Schema { get; set; }
+
         private String _Description;
         /// <summary>描述</summary>
         [XmlAttribute]

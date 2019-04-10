@@ -32,9 +32,9 @@ namespace XCode.Membership
 
         /// <summary>已重载。记录当前管理员</summary>
         /// <param name="isNew"></param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
-            base.Valid(isNew);
+            base.OnValid(isNew);
 
             if (isNew)
             {

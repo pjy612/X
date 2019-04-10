@@ -103,7 +103,8 @@ namespace XCode.Code
             if (atts["NameSpace"].IsNullOrEmpty()) atts["NameSpace"] = "";
             if (atts["ConnName"].IsNullOrEmpty()) atts["ConnName"] = "";
             if (atts["BaseClass"].IsNullOrEmpty()) atts["BaseClass"] = "Entity";
-
+            if (atts["UseDisplayName"].IsNullOrEmpty()) atts["UseDisplayName"] = "false";
+            
             // 保存模型文件
             var xml2 = ModelHelper.ToXml(tables, atts);
             if (xml != xml2) File.WriteAllText(xmlFile, xml2);
@@ -158,7 +159,13 @@ namespace XCode.Code
                 // 输出目录
                 str = item.Properties["Output"];
                 if (str.IsNullOrEmpty()) str = output;
+
                 builder.Output = str;
+
+                //是否使用 DisplayName
+                str = item.Properties["UseDisplayName"];
+                if (str.IsNullOrEmpty()) builder.UseDisplayName = Convert.ToBoolean(str);
+                
                 builder.Save(null, true);
 
                 builder.Business = true;

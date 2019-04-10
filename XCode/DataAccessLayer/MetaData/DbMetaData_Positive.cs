@@ -104,6 +104,7 @@ namespace XCode.DataAccessLayer
                 var table = DAL.CreateTable();
                 table.TableName = GetDataRowValue<String>(dr, _.TalbeName);
 
+                table.Schema = GetDataRowValue<String>(dr, "TABLE_SCHEMA");
                 // 描述
                 table.Description = GetDataRowValue<String>(dr, "DESCRIPTION");
 

@@ -159,11 +159,11 @@ namespace XCode.Membership
 
         /// <summary>验证数据，通过抛出异常的方式提示验证失败。</summary>
         /// <param name="isNew">是否新数据</param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
             if (String.IsNullOrEmpty(Name)) throw new ArgumentNullException(__.Name, _.Name.DisplayName + "不能为空！");
 
-            base.Valid(isNew);
+            base.OnValid(isNew);
 
             SavePermission();
         }

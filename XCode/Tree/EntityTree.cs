@@ -585,9 +585,9 @@ namespace XCode
         #region 数据检查
         /// <summary>验证树形数据是否有效</summary>
         /// <param name="isNew">是否新数据</param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
-            base.Valid(isNew);
+            base.OnValid(isNew);
 
             var key = (TKey)this[Setting.Key];
             var pkey = (TKey)this[Setting.Parent];

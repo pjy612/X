@@ -123,7 +123,7 @@ namespace XCode
                     if (!(list is IList<T> es)) es = list.ToList();
                     foreach (IEntity item in es.ToArray())
                     {
-                        if (item is EntityBase entity2) entity2.Valid(item.IsNullKey);
+                        if (item is EntityBase entity2) entity2.OnValid(item.IsNullKey);
                         if (!fact.Modules.Valid(item, item.IsNullKey)) es.Remove((T)item);
                     }
                     return BatchInsert(list);
@@ -378,7 +378,7 @@ namespace XCode
             // 验证对象
             foreach (IEntity item in list)
             {
-                if (item is EntityBase entity2) entity2.Valid(item.IsNullKey);
+                if (item is EntityBase entity2) entity2.OnValid(item.IsNullKey);
                 if (modules.Valid(item, item.IsNullKey)) rs.Add((T)item);
             }
 

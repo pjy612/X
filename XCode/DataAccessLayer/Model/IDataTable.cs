@@ -56,6 +56,9 @@ namespace XCode.DataAccessLayer
 
         /// <summary>扩展属性</summary>
         IDictionary<String, String> Properties { get; }
+
+        String Schema { get; set; }
+
         #endregion
 
         #region 方法

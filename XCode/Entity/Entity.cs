@@ -142,7 +142,7 @@ namespace XCode
         #region 操作
         private static IEntityPersistence Persistence => XCodeService.Container.ResolveInstance<IEntityPersistence>();
 
-        /// <summary>插入数据，<see cref="Valid"/>后，在事务中调用<see cref="OnInsert"/>。</summary>
+        /// <summary>插入数据，<see cref="OnValid"/>后，在事务中调用<see cref="OnInsert"/>。</summary>
         /// <returns></returns>
         public override Int32 Insert() => DoAction(OnInsert, true);
 
@@ -161,7 +161,7 @@ namespace XCode
             return rs;
         }
 
-        /// <summary>更新数据，<see cref="Valid"/>后，在事务中调用<see cref="OnUpdate"/>。</summary>
+        /// <summary>更新数据，<see cref="OnValid"/>后，在事务中调用<see cref="OnUpdate"/>。</summary>
         /// <returns></returns>
         public override Int32 Update() => DoAction(OnUpdate, false);
 
@@ -203,7 +203,7 @@ namespace XCode
                 var rt = false;
                 if (isnew != null)
                 {
-                    Valid(isnew.Value);
+                    OnValid(isnew.Value);
                     rt = Meta._Modules.Valid(this, isnew.Value);
                 }
                 else
@@ -246,7 +246,7 @@ namespace XCode
             var db = Meta.Session.Dal;
             if (db.SupportBatch)
             {
-                Valid(isnew);
+                OnValid(isnew);
                 if (!Meta.Modules.Valid(this, isnew)) return -1;
 
                 return this.Upsert();
@@ -285,7 +285,7 @@ namespace XCode
             // 提前执行Valid，让它提前准备好验证数据
             if (enableValid)
             {
-                Valid(isnew);
+                OnValid(isnew);
                 Meta._Modules.Valid(this, isnew);
             }
 
@@ -300,7 +300,7 @@ namespace XCode
         /// <summary>验证数据，通过抛出异常的方式提示验证失败。</summary>
         /// <remarks>建议重写者调用基类的实现，因为基类根据数据字段的唯一索引进行数据验证。</remarks>
         /// <param name="isNew">是否新数据</param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
             //// 实体来自数据库时，不要对唯一索引进行校验
             //if (_IsFromDatabase) return;

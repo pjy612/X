@@ -292,7 +292,7 @@ namespace XCode
         {
             var fs = new Dictionary<String, FieldItem>(StringComparer.OrdinalIgnoreCase);
             foreach (var fi in factory.Fields)
-                fs.Add(fi.Name, fi);
+                fs.Add(fi.ColumnName, fi);
 
             var sb = Pool.StringBuilder.Get();
             for (var i = 0; i < names.Length; i++)
@@ -300,7 +300,7 @@ namespace XCode
                 if (!fs.ContainsKey(names[i])) throw new ArgumentException("类[" + factory.EntityType.FullName + "]中不存在[" + names[i] + "]属性");
 
                 if (i > 0) sb.AppendFormat(" {0} ", split);
-                sb.Append(factory.FormatName(fs[names[i]].Name));
+                sb.Append(factory.FormatName(fs[names[i]].ColumnName));
                 sb.Append("=");
                 sb.Append(factory.FormatValue(names[i], values[i]));
             }
