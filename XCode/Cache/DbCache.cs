@@ -438,7 +438,7 @@ namespace NewLife.Caching
             var count = 0;
             foreach (var item in keys)
             {
-                var cacheKey = GetCacheKey(item);
+                var cacheKey = GetCacheKey(item, group);
                 if (_cache.ContainsKey(cacheKey))
                 {
                     _cache.Remove(cacheKey);
