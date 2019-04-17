@@ -2,7 +2,7 @@
 <Tables Version="9.11.7032.23994" NameSpace="XCode.Extension" ConnName="Ext" Output="" BaseClass="Entity" UseDisplayName="false">
   <Table Name="MyDbCache" Description="数据缓存" ConnName="DbCache">
     <Columns>
-      <Column Name="Id" DataType="Int64" PrimaryKey="True" IsIdentity="True" Description="Id标识" />
+      <Column Name="Id" DataType="Int64" PrimaryKey="True" Identity="True" Description="Id标识" />
       <Column Name="Group" DataType="String" Nullable="False" Description="分组" />
       <Column Name="Name" DataType="String" Master="True" Nullable="False" Description="名称" />
       <Column Name="Value" DataType="String" Nullable="False" Description="键值" />

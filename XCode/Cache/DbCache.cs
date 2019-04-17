@@ -62,13 +62,13 @@ namespace NewLife.Caching
 
             TimeField = (!timeName.IsNullOrEmpty() ? factory.Table.FindByName(timeName) : factory.MasterTime) as Field;
 
-            Factory  = factory;
+            Factory = factory;
             KeyField = key as Field;
-            Name     = name;
+            Name = name;
 
             // 关闭日志
             var db = factory.Session.Dal.Db;
-            db.ShowSQL                  =  false;
+            db.ShowSQL = false;
             (db as DbBase).TraceSQLTime *= 10;
 
             Init(null);
@@ -107,7 +107,7 @@ namespace NewLife.Caching
                 var period = Period;
                 clearTimer = new TimerX(RemoveNotAlive, null, period * 1000, period * 1000)
                 {
-                    Async      = true,
+                    Async = true,
                     CanExecute = () => Count > 0
                 };
             }
@@ -115,7 +115,7 @@ namespace NewLife.Caching
 
         private DictionaryCache<String, IDbCache> _cache = new DictionaryCache<String, IDbCache>()
         {
-            Expire    = 60,
+            Expire = 60,
             AllowNull = false,
         };
 
@@ -135,7 +135,7 @@ namespace NewLife.Caching
             Match match = Regex.Match(cacheKey, "(?<group>.*?)##(?<key>.+)");
             var groupName = match.Groups["group"].Value;
             var keyName = match.Groups["key"];
-            if ((object) GroupField == null)
+            if ((object)GroupField == null)
             {
                 return Factory.Find(KeyField == keyName) as IDbCache;
             }
@@ -154,7 +154,7 @@ namespace NewLife.Caching
 
         private IList<IDbCache> FindAll(String group, params String[] keys)
         {
-            if ((object) GroupField == null) return new List<IDbCache>();
+            if ((object)GroupField == null) return new List<IDbCache>();
             if (group.IsNullOrEmpty()) return new List<IDbCache>();
             var exp = new WhereExpression();
             exp &= GroupField == @group;
@@ -200,7 +200,7 @@ namespace NewLife.Caching
         /// <returns></returns>
         public Boolean ContainsGroup(String group)
         {
-            if ((object) GroupField                       == null) return false;
+            if ((object)GroupField == null) return false;
             return Factory.FindCount(GroupField == group) > 0;
         }
 
@@ -217,11 +217,11 @@ namespace NewLife.Caching
             if (e == null)
             {
                 //e = Factory.GetOrAdd(key) as IDbCache;
-                e      = Factory.Create() as IDbCache;
+                e = Factory.Create() as IDbCache;
                 e.Name = key;
                 if (e != null) _cache[GetCacheKey(e)] = e;
             }
-            e.Value       = value.ToJson();
+            e.Value = value.ToJson();
             e.ExpiredTime = TimerX.Now.AddSeconds(expire);
 
             if (e.CreateTime.Year < 2000) e.CreateTime = TimerX.Now;
@@ -245,12 +245,12 @@ namespace NewLife.Caching
             if (e == null)
             {
                 //e = Factory.GetOrAdd(key) as IDbCache;
-                e       = Factory.Create() as IDbCache;
+                e = Factory.Create() as IDbCache;
                 e.Group = group;
-                e.Name  = key;
+                e.Name = key;
                 if (e != null) _cache[GetCacheKey(e)] = e;
             }
-            e.Value       = value.ToJson();
+            e.Value = value.ToJson();
             e.ExpiredTime = TimerX.Now.AddSeconds(expire);
 
             if (e.CreateTime.Year < 2000) e.CreateTime = TimerX.Now;
@@ -267,7 +267,7 @@ namespace NewLife.Caching
         /// <param name="value">值</param>
         /// <param name="expire">过期时间</param>
         /// <returns></returns>
-        public Boolean Set<T>(String group, String key, T value, TimeSpan expire) => Set(group, key, value, (Int32) expire.TotalSeconds);
+        public Boolean Set<T>(String group, String key, T value, TimeSpan expire) => Set(group, key, value, (Int32)expire.TotalSeconds);
         /// <summary>
         /// 设置分组缓存
         /// </summary>
@@ -292,7 +292,7 @@ namespace NewLife.Caching
         /// <param name="keyFunc">根据值类型取键函数</param>
         /// <param name="expire">过期时间</param>
         /// <returns></returns>
-        public Boolean SetGroup<T>(String group, IList<T> list, Func<T, object> keyFunc, TimeSpan expire) => SetGroup(group, list, keyFunc, (Int32) expire.TotalSeconds);
+        public Boolean SetGroup<T>(String group, IList<T> list, Func<T, object> keyFunc, TimeSpan expire) => SetGroup(group, list, keyFunc, (Int32)expire.TotalSeconds);
 
         /// <summary>获取缓存项，不存在时返回默认值</summary>
         /// <param name="key">键</param>
@@ -305,8 +305,19 @@ namespace NewLife.Caching
             var value = e.Value;
             //return JsonHelper.Convert<T>(value);
             //if (typeof(T) == typeof(Byte[])) return (T)(Object)(value + "").ToBase64();
-            if (typeof(T) == typeof(String)) return (T) (Object) value;
-
+            if (typeof(T) == typeof(String)) return (T)(Object)value;
+            try
+            {
+                var decode = value.ToJsonEntity<object>();
+                if (decode is IList && !typeof(IList).IsAssignableFrom(typeof(T)))
+                {
+                    return value.ToJsonEntity<List<T>>().FirstOrDefault();
+                }
+            }
+            catch (Exception ex)
+            {
+                XTrace.WriteException(ex);
+            }
             //return value.ChangeType<T>();
             return value.ToJsonEntity<T>();
         }
@@ -322,8 +333,19 @@ namespace NewLife.Caching
             var value = e.Value;
             //return JsonHelper.Convert<T>(value);
             //if (typeof(T) == typeof(Byte[])) return (T)(Object)(value + "").ToBase64();
-            if (typeof(T) == typeof(String)) return (T) (Object) value;
-
+            if (typeof(T) == typeof(String)) return (T)(Object)value;
+            try
+            {
+                var decode = value.ToJsonEntity<object>();
+                if (decode is IList && !typeof(IList).IsAssignableFrom(typeof(T)))
+                {
+                    return value.ToJsonEntity<List<T>>().FirstOrDefault();
+                }
+            }
+            catch (Exception ex)
+            {
+                XTrace.WriteException(ex);
+            }
             //return value.ChangeType<T>();
             return value.ToJsonEntity<T>();
         }
@@ -362,7 +384,7 @@ namespace NewLife.Caching
                 {
                     if (typeof(T) == typeof(String))
                     {
-                        groupList.Add((T) (Object) dbCache.Value);
+                        groupList.Add((T)(Object)dbCache.Value);
                     }
                     else
                     {
@@ -557,9 +579,9 @@ namespace NewLife.Caching
             var e = Find(key);
             if (e != null) return false;
 
-            e             = Factory.Create() as IDbCache;
-            e.Name        = key;
-            e.Value       = value.ToJson();
+            e = Factory.Create() as IDbCache;
+            e.Name = key;
+            e.Value = value.ToJson();
             e.ExpiredTime = TimerX.Now.AddSeconds(expire);
             (e as IEntity).Insert();
 
@@ -568,7 +590,7 @@ namespace NewLife.Caching
             return true;
         }
 
-        public Boolean Add<T>(String key, T value, TimeSpan expire) => Add(key, value, (Int32) expire.TotalSeconds);
+        public Boolean Add<T>(String key, T value, TimeSpan expire) => Add(key, value, (Int32)expire.TotalSeconds);
 
         public Boolean Add<T>(String group, String key, T value, Int32 expire = -1)
         {
@@ -576,10 +598,10 @@ namespace NewLife.Caching
             var e = Find(key, group);
             if (e != null) return false;
 
-            e             = Factory.Create() as IDbCache;
-            e.Group       = group;
-            e.Name        = key;
-            e.Value       = value.ToJson();
+            e = Factory.Create() as IDbCache;
+            e.Group = group;
+            e.Name = key;
+            e.Value = value.ToJson();
             e.ExpiredTime = TimerX.Now.AddSeconds(expire);
             (e as IEntity).Insert();
 
@@ -588,7 +610,7 @@ namespace NewLife.Caching
             return true;
         }
 
-        public Boolean Add<T>(String group, String key, T value, TimeSpan expire) => Add(group, key, value, (Int32) expire.TotalSeconds);
+        public Boolean Add<T>(String group, String key, T value, TimeSpan expire) => Add(group, key, value, (Int32)expire.TotalSeconds);
 
         public Boolean AddGroup<T>(String group, IList<T> list, Func<T, object> keyFunc, Int32 expire = -1)
         {
@@ -604,11 +626,11 @@ namespace NewLife.Caching
                     {
                         return;
                     }
-                    e                = Factory.Create() as IDbCache;
-                    e.Group          = group;
-                    e.Name           = key;
-                    e.Value          = team.ToList().ToJson();
-                    e.ExpiredTime    = TimerX.Now.AddSeconds(expire);
+                    e = Factory.Create() as IDbCache;
+                    e.Group = group;
+                    e.Name = key;
+                    e.Value = team.ToList().ToJson();
+                    e.ExpiredTime = TimerX.Now.AddSeconds(expire);
                     _cache[cacheKey] = e;
                     e.SaveAsync();
                 });
@@ -621,7 +643,7 @@ namespace NewLife.Caching
             return true;
         }
 
-        public Boolean AddGroup<T>(String group, IList<T> list, Func<T, object> keyFunc, TimeSpan expire) => AddGroup(group, list, keyFunc, (Int32) expire.TotalSeconds);
+        public Boolean AddGroup<T>(String group, IList<T> list, Func<T, object> keyFunc, TimeSpan expire) => AddGroup(group, list, keyFunc, (Int32)expire.TotalSeconds);
 
         #endregion
 
