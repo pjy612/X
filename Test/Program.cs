@@ -13,6 +13,7 @@ using NewLife.Security;
 using NewLife.Serialization;
 using XCode.Code;
 using XCode.DataAccessLayer;
+using XCode.Extension;
 using XCode.Membership;
 using XCode.Service;
 
