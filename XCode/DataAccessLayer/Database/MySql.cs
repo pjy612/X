@@ -4,6 +4,7 @@ using System.Data;
 using System.Data.Common;
 using System.Linq;
 using System.Net;
+using System.Text.RegularExpressions;
 using NewLife.Collections;
 using NewLife.Data;
 using NewLife.Reflection;
@@ -460,8 +461,9 @@ namespace XCode.DataAccessLayer
         {
             { typeof(Byte[]), new String[] { "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "binary({0})", "varbinary({0})" } },
             //{ typeof(TimeSpan), new String[] { "TIME" } },
-            //{ typeof(SByte), new String[] { "TINYINT" } },
-            { typeof(Byte), new String[] { "TINYINT", "TINYINT UNSIGNED" } },
+            { typeof(Byte), new String[] { "TINYINT UNSIGNED" } },
+            { typeof(SByte), new String[] { "TINYINT" } },
+            //{ typeof(Byte), new String[] { "TINYINT", "TINYINT UNSIGNED" } },
             { typeof(Int16), new String[] { "SMALLINT", "SMALLINT UNSIGNED" } },
             //{ typeof(UInt16), new String[] { "SMALLINT UNSIGNED" } },
             { typeof(Int32), new String[] { "INT", "YEAR", "MEDIUMINT", "MEDIUMINT UNSIGNED", "INT UNSIGNED" } },
@@ -546,7 +548,7 @@ namespace XCode.DataAccessLayer
                     di.Name = dname;
                     di.Unique = dr2.Get<Int32>("Non_unique") == 0;
 
-                   
+
                     var cs = new List<String>();
                     if (di.Columns != null && di.Columns.Length > 0) cs.AddRange(di.Columns);
                     cs.Add(cname);
@@ -554,26 +556,26 @@ namespace XCode.DataAccessLayer
                     //table.Indexes.Add(di);
                 }
                 #endregion
-                
-//                List<IDataIndex> indices = table.Indexes.Where(r => !r.Unique && r.Columns.Length > 1).ToList();
-//                if (indices.Any())
-//                {
-//                    indices.ForEach(index =>
-//                    {
-//                        foreach (String column in index.Columns)
-//                        {
-//                            if (!table.Indexes.Exists(r => r.Columns.Length == 1 && (r.Columns.Contains(column) || r.Name == $"idx_{column}")))
-//                            {
-//                                IDataIndex di = table.CreateIndex();
-//                                di.Unique  = false;
-//                                di.Name    = $"idx_{column}";
-//                                di.Columns = new[] { column };
-//                                table.Indexes.Add(di);
-//                            }
-//                        }
-//                    });
-//                }
-//               
+
+                //                List<IDataIndex> indices = table.Indexes.Where(r => !r.Unique && r.Columns.Length > 1).ToList();
+                //                if (indices.Any())
+                //                {
+                //                    indices.ForEach(index =>
+                //                    {
+                //                        foreach (String column in index.Columns)
+                //                        {
+                //                            if (!table.Indexes.Exists(r => r.Columns.Length == 1 && (r.Columns.Contains(column) || r.Name == $"idx_{column}")))
+                //                            {
+                //                                IDataIndex di = table.CreateIndex();
+                //                                di.Unique  = false;
+                //                                di.Name    = $"idx_{column}";
+                //                                di.Columns = new[] { column };
+                //                                table.Indexes.Add(di);
+                //                            }
+                //                        }
+                //                    });
+                //                }
+                //               
                 // 修正关系数据
                 table.Fix();
 
@@ -598,6 +600,28 @@ namespace XCode.DataAccessLayer
             }
 
             return list;
+        }
+
+        public override Type GetDataType(string rawType)
+        {
+            if (rawType.Contains("(")) rawType = Regex.Replace(rawType, @"\(\d*\)", "");
+            var rawType2 = rawType + "(";
+
+            foreach (var item in Types)
+            {
+                String dbtype = null;
+                if (rawType.EqualIgnoreCase(item.Value))
+                {
+                    dbtype = item.Value[0];
+                }
+                else
+                {
+                    dbtype = item.Value.FirstOrDefault(e => e.StartsWithIgnoreCase(rawType2));
+                }
+                if (!dbtype.IsNullOrEmpty()) return item.Key;
+            }
+
+            return null;
         }
 
         public override String FieldClause(IDataColumn field, Boolean onlyDefine)
