@@ -413,7 +413,7 @@ namespace NewLife.Caching
                 if (grouping.Count() > 1)
                 {
                     DateTime expired = grouping.Max(r => r.ExpiredTime);
-                    Task.Run(() =>
+                    Task.Factory.StartNew(() =>
                     {
                         RemoveGroup(group);
                         SetGroup(group, groupList, arg => grouping.Key, expired - DateTime.Now);

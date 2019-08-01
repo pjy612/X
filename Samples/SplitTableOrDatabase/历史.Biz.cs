@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -41,7 +41,7 @@ namespace STOD.Entity
 
         /// <summary>验证数据，通过抛出异常的方式提示验证失败。</summary>
         /// <param name="isNew">是否插入</param>
-        public override void Valid(Boolean isNew)
+        public override void OnValid(Boolean isNew)
         {
             // 如果没有脏数据，则不需要进行任何处理
             if (!HasDirty) return;
