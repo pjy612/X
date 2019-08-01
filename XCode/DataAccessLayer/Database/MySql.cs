@@ -41,7 +41,7 @@ namespace XCode.DataAccessLayer
 
         const String Server_Key = "Server";
         const String CharSet = "CharSet";
-        const String AllowZeroDatetime = "Allow Zero Datetime";
+        //const String AllowZeroDatetime = "Allow Zero Datetime";
         const String MaxPoolSize = "MaxPoolSize";
         const String Sslmode = "Sslmode";
         protected override void OnSetConnectionString(ConnectionStringBuilder builder)
@@ -329,7 +329,7 @@ namespace XCode.DataAccessLayer
                             if (dc.Identity)
                                 cs.Add(0);
                             else
-                                cs.Add(dt.GetColumn(dc.Name));
+                                cs.Add(dt.GetColumn(dc.ColumnName));
                         }
                         ids = cs.ToArray();
                     }
@@ -474,7 +474,7 @@ namespace XCode.DataAccessLayer
             { typeof(Double), new String[] { "DOUBLE" } },
             { typeof(Decimal), new String[] { "DECIMAL({0}, {1})" } },
             { typeof(DateTime), new String[] { "DATETIME", "DATE", "TIMESTAMP", "TIME" } },
-            { typeof(String), new String[] { "NVARCHAR({0})", "TEXT", "CHAR({0})", "NCHAR({0})", "VARCHAR({0})", "SET", "ENUM", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT" } },
+            { typeof(String), new String[] { "NVARCHAR({0})", "LONGTEXT", "TEXT", "CHAR({0})", "NCHAR({0})", "VARCHAR({0})", "SET", "ENUM", "TINYTEXT", "TEXT", "MEDIUMTEXT" } },
             { typeof(Boolean), new String[] { "TINYINT" } },
         };
         #endregion

@@ -2,10 +2,13 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using NewLife.Caching;
+using NewLife.Core.Collections;
+using NewLife.Http;
 using NewLife.Log;
 using NewLife.Net;
 using NewLife.Remoting;
@@ -16,6 +19,9 @@ using XCode.DataAccessLayer;
 using XCode.Extension;
 using XCode.Membership;
 using XCode.Service;
+#if !NET4
+using TaskEx = System.Threading.Tasks.Task;
+#endif
 
 namespace Test
 {
@@ -54,7 +60,7 @@ namespace Test
             }
         }
 
-        private static void Test21()
+        static async void Test1()
         {
             DbCache dbCache = new DbCache(MyDbCache.Meta.Factory, MyDbCache.__.Group, MyDbCache.__.Name, MyDbCache.__.ExpiredTime);
             MyDbCache.Meta.Factory.Session.Dal.Db.ShowSQL = true;
@@ -191,19 +197,14 @@ namespace Test
 
         static void Test2()
         {
-            UserX.Meta.Session.Dal.Db.ShowSQL = true;
-            Log.Meta.Session.Dal.Db.ShowSQL = true;
-            //var sb = new StringBuilder();
-            //sb.Append("HelloWorld");
-            //sb.Length--;
-            //sb.Append("Stone");
-            //Console.WriteLine(sb.ToString());
-
             //DAL.AddConnStr("Log", "Data Source=tcp://127.0.0.1/ORCL;User Id=scott;Password=tiger;UseParameter=true", null, "Oracle");
             //DAL.AddConnStr("Log", "Server=.;Port=3306;Database=Log;Uid=root;Pwd=root;", null, "MySql");
             //DAL.AddConnStr("Membership", "Server=.;Port=3306;Database=times;Uid=root;Pwd=Pass@word;TablePrefix=xx_", null, "MySql");
             //DAL.AddConnStr("Membership", @"Server=.\JSQL2008;User ID=sa;Password=sa;Database=Membership;", null, "sqlserver");
             //DAL.AddConnStr("Log", @"Server=.\JSQL2008;User ID=sa;Password=sa;Database=Log;", null, "sqlserver");
+
+            UserX.Meta.Session.Dal.Db.ShowSQL = true;
+            Log.Meta.Session.Dal.Db.ShowSQL = true;
 
             var gs = UserX.FindAll(null, null, null, 0, 10);
             Console.WriteLine(gs.First().Logins);
@@ -252,9 +253,10 @@ namespace Test
             if (Console.ReadLine() == "1")
             {
                 var svr = new ApiServer(1234)
+                //var svr = new ApiServer("http://*:1234")
                 {
                     Log = XTrace.Log,
-                    EncoderLog = XTrace.Log,
+                    //EncoderLog = XTrace.Log,
                     StatPeriod = 10,
                 };
 
@@ -272,12 +274,14 @@ namespace Test
                 var client = new ApiClient("tcp://127.0.0.1:1234")
                 {
                     Log = XTrace.Log,
-                    EncoderLog = XTrace.Log,
+                    //EncoderLog = XTrace.Log,
                     StatPeriod = 10,
+
+                    UsePool = true,
                 };
                 client.Open();
 
-                Task.Run(() =>
+                TaskEx.Run(() =>
                 {
                     var sw = Stopwatch.StartNew();
                     try
@@ -295,7 +299,7 @@ namespace Test
                     XTrace.WriteLine("总耗时 {0:n0}ms", sw.ElapsedMilliseconds);
                 });
 
-                Task.Run(() =>
+                TaskEx.Run(() =>
                 {
                     var sw = Stopwatch.StartNew();
                     try
@@ -313,7 +317,7 @@ namespace Test
                     XTrace.WriteLine("总耗时 {0:n0}ms", sw.ElapsedMilliseconds);
                 });
 
-                Task.Run(() =>
+                TaskEx.Run(() =>
                 {
                     var sw = Stopwatch.StartNew();
                     try
@@ -331,7 +335,7 @@ namespace Test
                     XTrace.WriteLine("总耗时 {0:n0}ms", sw.ElapsedMilliseconds);
                 });
 
-                Task.Run(() =>
+                TaskEx.Run(() =>
                 {
                     var sw = Stopwatch.StartNew();
                     try
@@ -484,9 +488,9 @@ namespace Test
             //var ic = new MemoryCache();
 
             // 实例化Redis，默认端口6379可以省略，密码有两种写法
-            var ic = Redis.Create("127.0.0.1", 7);
+            //var ic = Redis.Create("127.0.0.1", 7);
             //var ic = Redis.Create("pass@127.0.0.1:6379", 7);
-            //var ic = Redis.Create("server=127.0.0.1:6379;password=pass", 7);
+            var ic = Redis.Create("server=127.0.0.1:6379;password=newlife", 7);
             ic.Log = XTrace.Log; // 调试日志。正式使用时注释
 
             var user = new User { Name = "NewLife", CreateTime = DateTime.Now };
@@ -517,6 +521,26 @@ namespace Test
             var count2 = ic.Decrement("count", 10);
             XTrace.WriteLine("count={0}", count2);
 
+            //var inf = ic.GetInfo();
+            //foreach (var item in inf)
+            //{
+            //    Console.WriteLine("{0}:\t{1}", item.Key, item.Value);
+            //}
+
+            for (var i = 0; i < 20; i++)
+            {
+                try
+                {
+                    ic.Set("k" + i, i, 30);
+                }
+                catch (Exception ex)
+                {
+                    //XTrace.WriteException(ex);
+                    XTrace.WriteLine(ex.Message);
+                }
+                Thread.Sleep(3_000);
+            }
+
             //ic.Bench();
         }
 
@@ -528,55 +552,37 @@ namespace Test
 
         static void Test7()
         {
-            Parameter.Meta.Session.Dal.Db.ShowSQL = true;
+            Role.Meta.Session.Dal.Db.ShowSQL = true;
+            Role.Meta.Session.Dal.Expire = 10;
+            Role.Meta.Session.Dal.Db.Readonly = true;
 
-            var p = Parameter.FindByCategoryAndName("量化交易", "交易所");
-            if (p == null) p = new Parameter
-            {
-                Category = "量化交易",
-                Name = "交易所"
-            };
-            var dic = new Dictionary<Int32, String>
-            {
-                [1] = "上海交易所",
-                [2] = "深圳交易所",
-                [900] = "纽约交易所"
-            };
-            p.SetValue(dic);
-            p.Save();
+            var list = Role.FindAll();
+            Console.WriteLine(list.Count);
 
-            var p2 = Parameter.FindByCategoryAndName("量化交易", "交易所");
-            var dic2 = p2.GetHash<Int32, String>();
-            foreach (var item in dic2)
-            {
-                Console.WriteLine("{0}={1}", item.Key, item.Value);
-            }
-            Console.WriteLine(p2.ToJson(true));
-            p2.Delete();
+            Thread.Sleep(1000);
+
+            list = Role.FindAll();
+            Console.WriteLine(list.Count);
+
+            Thread.Sleep(1000);
+
+            var r = list.Last();
+            r.IsSystem = !r.IsSystem;
+            r.Update();
+
+            Thread.Sleep(5000);
+
+            list = Role.FindAll();
+            Console.WriteLine(list.Count);
         }
 
         static void Test8()
         {
-            //XCode.Setting.Current.Debug = false;
-
-            var dal = UserX.Meta.Session.Dal;
-            var dt = UserX.Meta.Table.DataTable;
-            dal.Db.ShowSQL = false;
-
-            File.Delete("member3.db");
-            dal.Sync(dt, "member3");
-
-            dal.Backup(dt.TableName);
-
-            File.Delete("member2.db");
-            //DAL.AddConnStr("member2", "Server=.;Port=3306;Database=member2;Uid=root;Pwd=root;", null, "MySql");
-            //DAL.AddConnStr("member2", "Server=.;Port=3306;Database=member2;Uid=root;Pwd=root;", null, "Oracle");
-            var dal2 = DAL.Create("member2");
-            dal2.Db.ShowSQL = false;
-            dal2.Restore("user.table", dt);
-
-            //dal.BackupAll(null, "backup", true);
-            //dal2.RestoreAll("backup");
+            var ss = new String[8];
+            ss[1] = "Stone";
+            ss[3] = "NewLife";
+            var str = ss.Join();
+            Console.WriteLine(str);
         }
 
         static async void Test9()
