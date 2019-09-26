@@ -272,7 +272,7 @@ namespace XCode.Code
 
             if (Interface)
                 p = p.CombinePath("I" + Table.Name + ext);
-            else if (chineseFileName && !Table.DisplayName.IsNullOrEmpty()))
+            else if (chineseFileName && !Table.DisplayName.IsNullOrEmpty())
                 p = p.CombinePath(Table.DisplayName + ext);
             else
                 p = p.CombinePath(Table.Name + ext);
