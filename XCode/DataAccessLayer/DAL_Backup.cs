@@ -286,7 +286,7 @@ namespace XCode.DataAccessLayer
         /// <param name="file"></param>
         /// <param name="table"></param>
         /// <returns></returns>
-        public Int32 Restore(String file, IDataTable table = null)
+        public Int64 Restore(String file, IDataTable table = null)
         {
             if (file.IsNullOrEmpty() || !File.Exists(file)) return 0;
 
@@ -304,29 +304,31 @@ namespace XCode.DataAccessLayer
 
             WriteLog("恢复[{2}]到[{0}/{1}]", table, ConnName, file);
 
-            using (var fs = new FileStream(file2, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            {
-                if (file.EndsWithIgnoreCase(".gz"))
-                {
-                    using (var gs = new GZipStream(fs, CompressionMode.Decompress, true))
-                    {
-                        return Restore(gs, table);
-                    }
-                }
-                else
-                {
-                    return Restore(fs, table);
-                }
-            }
+            var compressed = file.EndsWithIgnoreCase(".gz");
+            return file2.AsFile().OpenRead(compressed, s => Restore(s, table));
+            //using (var fs = new FileStream(file2, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            //{
+            //    if (file.EndsWithIgnoreCase(".gz"))
+            //    {
+            //        using (var gs = new GZipStream(fs, CompressionMode.Decompress, true))
+            //        {
+            //            return Restore(gs, table);
+            //        }
+            //    }
+            //    else
+            //    {
+            //        return Restore(fs, table);
+            //    }
+            //}
         }
 
         /// <summary>从指定目录恢复一批数据到目标库</summary>
         /// <param name="dir"></param>
         /// <param name="tables"></param>
         /// <returns></returns>
-        public IDictionary<String, Int32> RestoreAll(String dir, IDataTable[] tables = null)
+        public IDictionary<String, Int64> RestoreAll(String dir, IDataTable[] tables = null)
         {
-            var dic = new Dictionary<String, Int32>();
+            var dic = new Dictionary<String, Int64>();
             if (dir.IsNullOrEmpty() || !Directory.Exists(dir)) return dic;
 
             if (tables == null)

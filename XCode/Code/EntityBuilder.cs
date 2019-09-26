@@ -45,7 +45,7 @@ namespace XCode.Code
         /// <param name="output">输出目录</param>
         /// <param name="nameSpace">命名空间</param>
         /// <param name="connName">连接名</param>
-        public static Int32 Build(String xmlFile = null, String output = null, String nameSpace = null, String connName = null)
+        public static Int32 Build(String xmlFile = null, String output = null, String nameSpace = null, String connName = null, Boolean? chineseFileName = null)
         {
             if (xmlFile.IsNullOrEmpty())
             {
@@ -94,17 +94,27 @@ namespace XCode.Code
             else
                 baseClass = atts["BaseClass"];
 
+            // 中文文件名
+            if (chineseFileName != null)
+            {
+                atts["ChineseFileName"] = chineseFileName.Value ? "True" : "False";
+            }
+            else
+            {
+                chineseFileName = atts["ChineseFileName"].ToBoolean(true);
+            }
+            
+
             XTrace.WriteLine("代码生成源：{0}", xmlFile);
 
-            var rs = BuildTables(tables, output, nameSpace, connName, baseClass);
+            var rs = BuildTables(tables, output, nameSpace, connName, baseClass, chineseFileName.Value);
 
             // 确保输出空特性
             if (atts["Output"].IsNullOrEmpty()) atts["Output"] = "";
             if (atts["NameSpace"].IsNullOrEmpty()) atts["NameSpace"] = "";
             if (atts["ConnName"].IsNullOrEmpty()) atts["ConnName"] = "";
             if (atts["BaseClass"].IsNullOrEmpty()) atts["BaseClass"] = "Entity";
-            if (atts["UseDisplayName"].IsNullOrEmpty()) atts["UseDisplayName"] = "false";
-            
+
             // 保存模型文件
             var xml2 = ModelHelper.ToXml(tables, atts);
             if (xml != xml2) File.WriteAllText(xmlFile, xml2);
@@ -118,7 +128,8 @@ namespace XCode.Code
         /// <param name="nameSpace">命名空间</param>
         /// <param name="connName">连接名</param>
         /// <param name="baseClass">基类</param>
-        public static Int32 BuildTables(IList<IDataTable> tables, String output = null, String nameSpace = null, String connName = null, String baseClass = null)
+        /// <param name="chineseFileName">是否中文名称</param>
+        public static Int32 BuildTables(IList<IDataTable> tables, String output = null, String nameSpace = null, String connName = null, String baseClass = null, Boolean chineseFileName = true)
         {
             if (tables == null || tables.Count == 0) return 0;
 
@@ -159,18 +170,12 @@ namespace XCode.Code
                 // 输出目录
                 str = item.Properties["Output"];
                 if (str.IsNullOrEmpty()) str = output;
-
                 builder.Output = str;
-
-                //是否使用 DisplayName
-                str = item.Properties["UseDisplayName"];
-                if (str.IsNullOrEmpty()) builder.UseDisplayName = Convert.ToBoolean(str);
-                
-                builder.Save(null, true);
+                builder.Save(null, true, chineseFileName);
 
                 builder.Business = true;
                 builder.Execute();
-                builder.Save(null, false);
+                builder.Save(null, false, chineseFileName);
 
                 count++;
             }
@@ -239,7 +244,7 @@ namespace XCode.Code
         /// <summary>保存</summary>
         /// <param name="ext"></param>
         /// <param name="overwrite"></param>
-        public override String Save(String ext = null, Boolean overwrite = true)
+        public override String Save(String ext = null, Boolean overwrite = true, Boolean chineseFileName = true)
         {
             if (ext.IsNullOrEmpty() && Business)
             {
@@ -247,7 +252,7 @@ namespace XCode.Code
                 //overwrite = false;
             }
 
-            return base.Save(ext, overwrite);
+            return base.Save(ext, overwrite, chineseFileName);
         }
 
         /// <summary>生成尾部</summary>
@@ -283,6 +288,7 @@ namespace XCode.Code
                 us.Add("System.Web");
                 //us.Add("System.Web.Script.Serialization");
                 us.Add("System.Xml.Serialization");
+                us.Add("System.Runtime.Serialization");
 
                 us.Add("NewLife");
                 us.Add("NewLife.Data");
@@ -791,7 +797,7 @@ namespace XCode.Code
                     var pk = dt.PrimaryKeys[0];
 
                     WriteLine("/// <summary>{0}</summary>", dis);
-                    WriteLine("[XmlIgnore]");
+                    WriteLine("[XmlIgnore, IgnoreDataMember]");
                     WriteLine("//[ScriptIgnore]");
                     WriteLine("public {1} {1} {{ get {{ return Extends.Get({0}, k => {1}.FindBy{3}({2})); }} }}", NameOf(pname), dt.Name, dc.Name, pk.Name);
 
@@ -802,7 +808,7 @@ namespace XCode.Code
                     {
                         WriteLine();
                         WriteLine("/// <summary>{0}</summary>", dis);
-                        WriteLine("[XmlIgnore]");
+                        WriteLine("[XmlIgnore, IgnoreDataMember]");
                         WriteLine("//[ScriptIgnore]");
                         if (!dis.IsNullOrEmpty()) WriteLine("[DisplayName(\"{0}\")]", dis);
                         WriteLine("[Map(__.{0}, typeof({1}), \"{2}\")]", dc.Name, dt.Name, pk.Name);
