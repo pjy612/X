@@ -14,7 +14,7 @@ namespace NewLife.Net
     public class NetSession<TServer> : NetSession where TServer : NetServer
     {
         /// <summary>主服务</summary>
-        public virtual TServer Host { get { return (this as INetSession).Host as TServer; } set { (this as INetSession).Host = value; } }
+        public virtual TServer Host { get => (this as INetSession).Host as TServer; set => (this as INetSession).Host = value; }
     }
 
     /// <summary>网络服务的会话</summary>
@@ -45,7 +45,7 @@ namespace NewLife.Net
         /// <summary>获取/设置 用户会话数据</summary>
         /// <param name="key"></param>
         /// <returns></returns>
-        public virtual Object this[String key] { get { return Items[key]; } set { Items[key] = value; } }
+        public virtual Object this[String key] { get => Items[key]; set => Items[key] = value; }
         #endregion
 
         #region 方法
@@ -68,11 +68,11 @@ namespace NewLife.Net
 
         /// <summary>子类重载实现资源释放逻辑时必须首先调用基类方法</summary>
         /// <param name="disposing">从Dispose调用（释放所有资源）还是析构函数调用（释放非托管资源）</param>
-        protected override void OnDispose(Boolean disposing)
+        protected override void Dispose(Boolean disposing)
         {
             if (LogSession && Log != null && Log.Enable) WriteLog("会话结束 {0}", Session);
 
-            base.OnDispose(disposing);
+            base.Dispose(disposing);
 
             //Session.Dispose();//去掉这句话，因为在释放的时候Session有的时候为null，会出异常报错，导致整个程序退出。去掉后正常。
             Session.TryDispose();

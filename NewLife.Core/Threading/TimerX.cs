@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Threading;
 
+#nullable enable
 namespace NewLife.Threading
 {
     /// <summary>不可重入的定时器。</summary>
@@ -13,7 +14,7 @@ namespace NewLife.Threading
     /// 
     /// TimerX必须维持对象，否则Scheduler也没有维持对象时，大家很容易一起被GC回收。
     /// </remarks>
-    public class TimerX : /*DisposeBase*/IDisposable
+    public class TimerX : IDisposable
     {
         #region 属性
         /// <summary>所属调度器</summary>
@@ -23,7 +24,7 @@ namespace NewLife.Threading
         public WeakAction<Object> Callback { get; set; }
 
         /// <summary>获取/设置 用户数据</summary>
-        public Object State { get; set; }
+        public Object? State { get; set; }
 
         /// <summary>获取/设置 下一次调用时间</summary>
         public DateTime NextTime { get; set; }
@@ -47,14 +48,14 @@ namespace NewLife.Threading
         public Int32 Cost { get; internal set; }
 
         /// <summary>判断任务是否执行的委托。一般跟异步配合使用，避免频繁从线程池借出线程</summary>
-        public Func<Boolean> CanExecute { get; set; }
+        public Func<Boolean>? CanExecute { get; set; }
         #endregion
 
         #region 静态
         [ThreadStatic]
-        private static TimerX _Current;
+        private static TimerX? _Current;
         /// <summary>当前定时器</summary>
-        public static TimerX Current { get => _Current; internal set => _Current = value; }
+        public static TimerX? Current { get => _Current; internal set => _Current = value; }
         #endregion
 
         #region 构造
@@ -64,7 +65,7 @@ namespace NewLife.Threading
         /// <param name="dueTime">多久之后开始。毫秒</param>
         /// <param name="period">间隔周期。毫秒</param>
         /// <param name="scheduler">调度器</param>
-        public TimerX(WaitCallback callback, Object state, Int32 dueTime, Int32 period, String scheduler = null)
+        public TimerX(WaitCallback callback, Object? state, Int32 dueTime, Int32 period, String? scheduler = null)
         {
             if (dueTime < 0) throw new ArgumentOutOfRangeException(nameof(dueTime));
             //if (period < 0) throw new ArgumentOutOfRangeException("period");
@@ -75,7 +76,7 @@ namespace NewLife.Threading
 
             NextTime = DateTime.Now.AddMilliseconds(dueTime);
 
-            Scheduler = scheduler.IsNullOrEmpty() ? TimerScheduler.Default : TimerScheduler.Create(scheduler);
+            Scheduler = (scheduler == null || scheduler.IsNullOrEmpty()) ? TimerScheduler.Default : TimerScheduler.Create(scheduler);
             Scheduler.Add(this);
         }
 
@@ -85,7 +86,7 @@ namespace NewLife.Threading
         /// <param name="startTime">绝对开始时间</param>
         /// <param name="period">间隔周期。毫秒</param>
         /// <param name="scheduler">调度器</param>
-        public TimerX(WaitCallback callback, Object state, DateTime startTime, Int32 period, String scheduler = null)
+        public TimerX(WaitCallback callback, Object state, DateTime startTime, Int32 period, String? scheduler = null)
         {
             if (startTime <= DateTime.MinValue) throw new ArgumentOutOfRangeException(nameof(startTime));
             //if (period < 0) throw new ArgumentOutOfRangeException("period");
@@ -108,12 +109,31 @@ namespace NewLife.Threading
             }
             NextTime = next;
 
-            Scheduler = scheduler.IsNullOrEmpty() ? TimerScheduler.Default : TimerScheduler.Create(scheduler);
+            Scheduler = (scheduler == null || scheduler.IsNullOrEmpty()) ? TimerScheduler.Default : TimerScheduler.Create(scheduler);
             Scheduler.Add(this);
         }
 
         /// <summary>销毁定时器</summary>
-        public void Dispose() => Scheduler?.Remove(this);
+        public void Dispose()
+        {
+            Dispose(true);
+
+            // 告诉GC，不要调用析构函数
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>销毁</summary>
+        /// <param name="disposing"></param>
+        protected virtual void Dispose(Boolean disposing)
+        {
+            if (disposing)
+            {
+                // 释放托管资源
+            }
+
+            // 释放非托管资源
+            Scheduler?.Remove(this);
+        }
         #endregion
 
         #region 方法
@@ -139,7 +159,7 @@ namespace NewLife.Threading
         /// <returns></returns>
         public static TimerX Delay(WaitCallback callback, Int32 ms) => new TimerX(callback, null, ms, 0) { Async = true };
 
-        private static TimerX _NowTimer;
+        private static TimerX? _NowTimer;
         private static DateTime _Now;
         /// <summary>当前时间。定时读取系统时间，避免频繁读取系统时间造成性能瓶颈</summary>
         public static DateTime Now
@@ -174,3 +194,4 @@ namespace NewLife.Threading
         #endregion
     }
 }
+#nullable restore

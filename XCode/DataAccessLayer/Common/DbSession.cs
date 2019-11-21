@@ -28,9 +28,9 @@ namespace XCode.DataAccessLayer
 
         /// <summary>销毁资源时，回滚未提交事务，并关闭数据库连接</summary>
         /// <param name="disposing"></param>
-        protected override void OnDispose(Boolean disposing)
+        protected override void Dispose(Boolean disposing)
         {
-            base.OnDispose(disposing);
+            base.Dispose(disposing);
 
             try
             {
@@ -534,7 +534,15 @@ namespace XCode.DataAccessLayer
             var dt = db._SchemaCache[key];
             if (dt == null)
             {
-                dt = Process(conn2 => GetSchemaInternal(conn2, key, collectionName, restrictionValues));
+                /*
+                * TODO: Bug
+                * sqlserver切换到master库时,仍然使用Process去获取DbConnection，然而此时DataBase对象为连接字符串中的数据库
+                * 这里不知道是应该在RemoteDb的OpenDatabase方法（改变DataBase对象）抑或是修改这里的Process方法
+                */
+                if (conn != null)
+                    dt = GetSchemaInternal(conn, key, collectionName, restrictionValues);
+                else
+                    dt = Process(conn2 => GetSchemaInternal(conn2, key, collectionName, restrictionValues));
 
                 db._SchemaCache[key] = dt;
             }

@@ -4,6 +4,9 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Http;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using NewLife;
@@ -12,6 +15,7 @@ using NewLife.Core.Collections;
 using NewLife.Http;
 using NewLife.Log;
 using NewLife.Net;
+using NewLife.Reflection;
 using NewLife.Remoting;
 using NewLife.Security;
 using NewLife.Serialization;
@@ -233,20 +237,20 @@ namespace Test
             }
             //list.Save();
 
-            var user = gs.FirstOrDefault();
-            if (user != null)
-            {
-                user.Logins++;
-                user.SaveAsync();
-            }
 
-            Thread.Sleep(3000);
+            //Console.WriteLine(client.BaseAddress);
 
-            count = UserX.FindCount();
-            Console.WriteLine("Count={0}", count);
-            //gs = UserX.FindAll(null, null, null, 0, 10);
+            //Console.WriteLine(uri);
+            //Console.WriteLine(client.BaseAddress == uri);
 
-            //gs.Delete(true);
+            var client = new HttpClient();
+            client.BaseAddress = new Uri("http://feifan.link:2233");
+
+            var rs = client.Invoke<Object>("api/info");
+            Console.WriteLine(rs.ToJson(true));
+
+            rs = client.Invoke<Object>("api/info3", rs);
+            Console.WriteLine(rs.ToJson(true));
         }
 
         static void Test3()
@@ -276,7 +280,7 @@ namespace Test
             }
             else
             {
-                var client = new ApiClient("tcp://127.0.0.1:1234")
+                var client = new ApiClient("tcp://127.0.0.1:335,tcp://127.0.0.1:1234")
                 {
                     Log = XTrace.Log,
                     //EncoderLog = XTrace.Log,
@@ -486,82 +490,64 @@ namespace Test
             //Console.WriteLine("Execute={0}", es);
         }
 
+        private static NetServer _netServer;
         static void Test6()
         {
-            // 缓存默认实现Cache.Default是MemoryCache，可修改
-            //var ic = Cache.Default;
-            //var ic = new MemoryCache();
+            var pfx = new X509Certificate2("../newlife.pfx", "newlife");
+            //Console.WriteLine(pfx);
 
-            // 实例化Redis，默认端口6379可以省略，密码有两种写法
-            //var ic = Redis.Create("127.0.0.1", 7);
-            //var ic = Redis.Create("pass@127.0.0.1:6379", 7);
-            var ic = Redis.Create("server=127.0.0.1:6379;password=newlife", 7);
-            ic.Log = XTrace.Log; // 调试日志。正式使用时注释
+            //using var svr = new ApiServer(1234);
+            //svr.Log = XTrace.Log;
+            //svr.EncoderLog = XTrace.Log;
 
-            var user = new User { Name = "NewLife", CreateTime = DateTime.Now };
-            ic.Set("user", user, 3600);
-            var user2 = ic.Get<User>("user");
-            XTrace.WriteLine("Json: {0}", ic.Get<String>("user"));
-            if (ic.ContainsKey("user")) XTrace.WriteLine("存在！");
-            ic.Remove("user");
+            //var ns = svr.EnsureCreate() as NetServer;
 
-            var dic = new Dictionary<String, Object>
+            using var ns = new NetServer(1234)
             {
-                ["name"] = "NewLife",
-                ["time"] = DateTime.Now,
-                ["count"] = 1234
+                Name = "Server",
+                ProtocolType = NetType.Tcp,
+                Log = XTrace.Log,
+                SessionLog = XTrace.Log,
+                SocketLog = XTrace.Log,
+                LogReceive = true
             };
-            ic.SetAll(dic, 120);
 
-            var vs = ic.GetAll<String>(dic.Keys);
-            XTrace.WriteLine(vs.Join(",", e => $"{e.Key}={e.Value}"));
-
-            var flag = ic.Add("count", 5678);
-            XTrace.WriteLine(flag ? "Add成功" : "Add失败");
-            var ori = ic.Replace("count", 777);
-            var count = ic.Get<Int32>("count");
-            XTrace.WriteLine("count由{0}替换为{1}", ori, count);
-
-            ic.Increment("count", 11);
-            var count2 = ic.Decrement("count", 10);
-            XTrace.WriteLine("count={0}", count2);
-
-            //var inf = ic.GetInfo();
-            //foreach (var item in inf)
-            //{
-            //    Console.WriteLine("{0}:\t{1}", item.Key, item.Value);
-            //}
-
-            for (var i = 0; i < 20; i++)
+            ns.EnsureCreateServer();
+            foreach (var item in ns.Servers)
             {
-                try
-                {
-                    ic.Set("k" + i, i, 30);
-                }
-                catch (Exception ex)
-                {
-                    //XTrace.WriteException(ex);
-                    XTrace.WriteLine(ex.Message);
-                }
-                Thread.Sleep(3_000);
+                if (item is TcpServer ts) ts.Certificate = pfx;
             }
 
-            //ic.Bench();
-        }
+            ns.Received += (s, e) =>
+            {
+                XTrace.WriteLine("收到：{0}", e.Packet.ToStr());
+            };
+            ns.Start();
 
-        class User
-        {
-            public String Name { get; set; }
-            public DateTime CreateTime { get; set; }
-        }
+            using var client = new TcpSession
+            {
+                Name = "Client",
+                Remote = new NetUri("tcp://127.0.0.1:1234"),
+                SslProtocol = SslProtocols.Tls,
+                Log = XTrace.Log,
+                LogSend = true
+            };
+            client.Open();
 
+            client.Send("Stone");
+
+            Console.ReadLine();
+        }
         static void Test7()
         {
             Role.Meta.Session.Dal.Db.ShowSQL = true;
             Role.Meta.Session.Dal.Expire = 10;
-            Role.Meta.Session.Dal.Db.Readonly = true;
+            //Role.Meta.Session.Dal.Db.Readonly = true;
 
             var list = Role.FindAll();
+            Console.WriteLine(list.Count);
+
+            list = Role.FindAll(Role._.Name.NotContains("abc"));
             Console.WriteLine(list.Count);
 
             Thread.Sleep(1000);

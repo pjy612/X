@@ -11,6 +11,7 @@ using NewLife.Reflection;
 using NewLife.Serialization;
 using NewLife.Threading;
 
+//#nullable enable
 namespace NewLife.Caching
 {
     /// <summary>默认字典缓存</summary>
@@ -39,9 +40,9 @@ namespace NewLife.Caching
 
         /// <summary>销毁</summary>
         /// <param name="disposing"></param>
-        protected override void OnDispose(Boolean disposing)
+        protected override void Dispose(Boolean disposing)
         {
-            base.OnDispose(disposing);
+            base.Dispose(disposing);
 
             clearTimer.TryDispose();
             clearTimer = null;
@@ -146,9 +147,9 @@ namespace NewLife.Caching
         /// <returns></returns>
         public override T Get<T>(String key)
         {
-            if (!_cache.TryGetValue(key, out var item) || item == null) return default(T);
+            if (!_cache.TryGetValue(key, out var item) || item == null) return default;
 
-            return (T)item.Visit();
+            return item.Visit().ChangeType<T>();
         }
 
         /// <summary>批量移除缓存项</summary>
@@ -170,7 +171,11 @@ namespace NewLife.Caching
         }
 
         /// <summary>清空所有缓存项</summary>
-        public override void Clear() => _cache.Clear();
+        public override void Clear()
+        {
+            _cache.Clear();
+            _count = 0;
+        }
 
         /// <summary>设置缓存项有效期</summary>
         /// <param name="key">键</param>
@@ -210,7 +215,7 @@ namespace NewLife.Caching
             CacheItem ci = null;
             do
             {
-                if (_cache.TryGetValue(key, out var item)) return false;
+                if (_cache.TryGetValue(key, out _)) return false;
 
                 if (ci == null) ci = new CacheItem(value, expire);
             } while (!_cache.TryAdd(key, ci));
@@ -244,7 +249,7 @@ namespace NewLife.Caching
 
             Interlocked.Increment(ref _count);
 
-            return default(T);
+            return default;
         }
 
         /// <summary>累加，原子操作</summary>
@@ -413,11 +418,11 @@ namespace NewLife.Caching
             {
                 var code = value.GetType().GetTypeCode();
                 // 原子操作
-                Object newValue = null;
-                Object oldValue = null;
+                Object newValue;
+                Object oldValue;
                 do
                 {
-                    oldValue = _Value;
+                    oldValue = _Value ?? 0;
                     switch (code)
                     {
                         case TypeCode.Int32:
@@ -445,11 +450,11 @@ namespace NewLife.Caching
             {
                 var code = value.GetType().GetTypeCode();
                 // 原子操作
-                Object newValue = null;
-                Object oldValue = null;
+                Object newValue;
+                Object oldValue;
                 do
                 {
-                    oldValue = _Value;
+                    oldValue = _Value ?? 0;
                     switch (code)
                     {
                         case TypeCode.Int32:
@@ -488,7 +493,8 @@ namespace NewLife.Caching
             // 过期时间升序，用于缓存满以后删除
             var slist = new SortedList<DateTime, IList<String>>();
             // 超出个数
-            if (Capacity <= 0 || _count <= Capacity) slist = null;
+            var flag = true;
+            if (Capacity <= 0 || _count <= Capacity) flag = false;
 
             // 60分钟之内过期的数据，进入LRU淘汰
             var now = TimerX.Now;
@@ -505,7 +511,7 @@ namespace NewLife.Caching
                 else
                 {
                     k++;
-                    if (slist != null && ci.ExpiredTime < exp)
+                    if (flag && ci.ExpiredTime < exp)
                     {
                         if (!slist.TryGetValue(ci.VisitTime, out var ss))
                             slist.Add(ci.VisitTime, ss = new List<String>());
@@ -516,7 +522,7 @@ namespace NewLife.Caching
             }
 
             // 如果满了，删除前面
-            if (slist != null && slist.Count > 0 && _count - list.Count > Capacity)
+            if (flag && slist.Count > 0 && _count - list.Count > Capacity)
             {
                 var over = _count - list.Count - Capacity;
                 for (var i = 0; i < slist.Count && over > 0; i++)
@@ -571,10 +577,13 @@ namespace NewLife.Caching
                 var ci = item.Value;
                 var code = ci.Value?.GetType().GetTypeCode() ?? TypeCode.Empty;
                 bn.Write((Byte)code);
-                if (code == TypeCode.Object)
-                    bn.Write(Binary.FastWrite(ci.Value));
-                else
-                    bn.Write(ci);
+                if (ci.Value != null)
+                {
+                    if (code == TypeCode.Object)
+                        bn.Write(Binary.FastWrite(ci.Value));
+                    else
+                        bn.Write(ci);
+                }
 
                 bn.Write(ci.ExpiredTime.ToInt());
             }
@@ -597,7 +606,7 @@ namespace NewLife.Caching
                 var key = bn.Read<String>();
                 var code = (TypeCode)bn.ReadByte();
 
-                Object value = null;
+                Object value;
                 if (code == TypeCode.Object)
                     value = bn.Read<Packet>();
                 else
@@ -698,3 +707,4 @@ namespace NewLife.Caching
         }
     }
 }
+//#nullable restore

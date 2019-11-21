@@ -3,12 +3,13 @@ using System.Reflection;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
-#if !__CORE__
+#if __WIN__
 using System.Windows.Forms;
 #endif
 using NewLife.Reflection;
 using NewLife.Threading;
 
+#nullable enable
 namespace NewLife.Log
 {
     /// <summary>日志类，包含跟踪调试功能</summary>
@@ -22,7 +23,7 @@ namespace NewLife.Log
     {
         #region 写日志
         /// <summary>文本文件日志</summary>
-        private static ILog _Log;
+        private static ILog _Log = Logger.Null;
         /// <summary>日志提供者，默认使用文本文件日志</summary>
         public static ILog Log { get { InitLog(); return _Log; } set { _Log = value; } }
 
@@ -38,7 +39,7 @@ namespace NewLife.Log
         /// <summary>写日志</summary>
         /// <param name="format"></param>
         /// <param name="args"></param>
-        public static void WriteLine(String format, params Object[] args)
+        public static void WriteLine(String format, params Object?[] args)
         {
             if (!InitLog()) return;
 
@@ -73,7 +74,7 @@ namespace NewLife.Log
         }
         static void CurrentDomain_UnhandledException(Object sender, UnhandledExceptionEventArgs e)
         {
-            WriteException(e.ExceptionObject as Exception);
+            if (e.ExceptionObject is Exception ex) WriteException(ex);
             if (e.IsTerminating) Log.Fatal("异常退出！");
         }
 
@@ -108,12 +109,12 @@ namespace NewLife.Log
              * 6，正常写入日志
              */
 
-            if (_Log != null) return true;
+            if (_Log != null && _Log != Logger.Null) return true;
             if (_initing > 0 && _initing == Thread.CurrentThread.ManagedThreadId) return false;
 
             lock (_lock)
             {
-                if (_Log != null) return true;
+                if (_Log != null && _Log != Logger.Null) return true;
 
                 _initing = Thread.CurrentThread.ManagedThreadId;
                 _Log = TextFileLog.Create(LogPath);
@@ -240,7 +241,7 @@ namespace NewLife.Log
         /// <returns></returns>
         public static ILog Combine(this Control control, ILog log, Int32 maxLines = 1000)
         {
-            if (control == null || log == null) return log;
+            //if (control == null || log == null) return log;
 
             var clg = new TextControlLog
             {
@@ -296,3 +297,4 @@ namespace NewLife.Log
         #endregion
     }
 }
+#nullable restore

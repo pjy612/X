@@ -103,7 +103,7 @@ namespace XCode.DataAccessLayer
             }
             catch (Exception ex)
             {
-                DAL.WriteLog("[2]GetSchema({0})异常重试！{1}", collectionName, ex.Message, Database.ConnName);
+                DAL.WriteLog("[{2}]GetSchema({0})异常重试！{1}", collectionName, ex.Message, Database.ConnName);
 
                 // 如果没有数据库，登录会失败，需要切换到系统数据库再试试
                 return ProcessWithSystem((s, c) => base.GetSchema(c, collectionName, restrictionValues)) as DataTable;
@@ -125,9 +125,9 @@ namespace XCode.DataAccessLayer
                 {
                     try
                     {
-                        conn.ConnectionString = Database.ConnectionString;
+                        //conn.ConnectionString = Database.ConnectionString;
 
-                        OpenDatabase(conn, sysdbname);
+                        OpenDatabase(conn, Database.ConnectionString, sysdbname);
 
                         return callback(this, conn);
                     }
@@ -143,10 +143,10 @@ namespace XCode.DataAccessLayer
             }
         }
 
-        private static void OpenDatabase(IDbConnection conn, String dbName)
+        private static void OpenDatabase(IDbConnection conn, String connStr, String dbName)
         {
             // 如果没有打开，则改变链接字符串
-            var builder = new ConnectionStringBuilder(conn.ConnectionString);
+            var builder = new ConnectionStringBuilder(connStr);
             var flag = false;
             if (builder["Database"] != null)
             {
@@ -160,10 +160,11 @@ namespace XCode.DataAccessLayer
             }
             if (flag)
             {
-                var connStr = builder.ToString();
-                conn.ConnectionString = connStr;
+                connStr = builder.ToString();
+                //WriteLog("系统级：{0}", connStr);
             }
 
+            conn.ConnectionString = connStr;
             conn.Open();
         }
         #endregion
@@ -181,7 +182,8 @@ namespace XCode.DataAccessLayer
             var session = Database.CreateSession();
             var databaseName = Database.DatabaseName;
 
-            if (values != null && values.Length > 0 && values[0] is String && values[0] + "" != "") databaseName = values[0] + "";  //ahuang 2014.06.12  类型强制转string的bug
+            // ahuang 2014.06.12  类型强制转string的bug
+            if (values != null && values.Length > 0 && values[0] is String str && !str.IsNullOrEmpty()) databaseName = str;
 
             switch (schema)
             {

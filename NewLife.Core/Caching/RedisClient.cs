@@ -11,6 +11,7 @@ using NewLife.Net;
 using NewLife.Reflection;
 using NewLife.Serialization;
 
+//#nullable enable
 namespace NewLife.Caching
 {
     /// <summary>Redis客户端</summary>
@@ -40,11 +41,20 @@ namespace NewLife.Caching
         #endregion
 
         #region 构造
+        /// <summary>实例化</summary>
+        /// <param name="redis"></param>
+        /// <param name="server"></param>
+        public RedisClient(Redis redis, NetUri server)
+        {
+            Host = redis;
+            Server = server;
+        }
+
         /// <summary>销毁</summary>
         /// <param name="disposing"></param>
-        protected override void OnDispose(Boolean disposing)
+        protected override void Dispose(Boolean disposing)
         {
-            base.OnDispose(disposing);
+            base.Dispose(disposing);
 
             // 销毁时退出
             if (Logined)
@@ -75,7 +85,7 @@ namespace NewLife.Caching
             try
             {
                 ns = tc?.GetStream();
-                active = ns != null && tc.Connected && ns != null && ns.CanWrite && ns.CanRead;
+                active = ns != null && tc != null && tc.Connected && ns != null && ns.CanWrite && ns.CanRead;
             }
             catch { }
 
@@ -291,7 +301,7 @@ namespace NewLife.Caching
         {
             var rs = ReadPacket(ms);
 
-            if (rs != null && Log != null && Log != Logger.Null)
+            if (/*rs != null &&*/ Log != null && Log != Logger.Null)
             {
                 if (rs.Count <= 32)
                     WriteLog("=> {0}", rs.ToStr());
@@ -329,7 +339,8 @@ namespace NewLife.Caching
         private Packet ReadPacket(Stream ms)
         {
             var len = ReadLine(ms).ToInt(-1);
-            if (len <= 0) return null;
+            //if (len <= 0) return null;
+            if (len <= 0) throw new InvalidDataException();
 
             var buf = new Byte[len + 2];
             var p = 0;
@@ -388,13 +399,13 @@ namespace NewLife.Caching
             if (_ps != null)
             {
                 _ps.Add(new Command(cmd, args, typeof(TResult)));
-                return default(TResult);
+                return default;
             }
 
             var rs = Execute(cmd, args);
-            if (TryChangeType(rs, typeof(TResult), out var target)) return (TResult)target;
+            if (rs != null && TryChangeType(rs, typeof(TResult), out var target)) return (TResult)target;
 
-            return default(TResult);
+            return default;
         }
 
         /// <summary>尝试转换类型</summary>
@@ -433,7 +444,7 @@ namespace NewLife.Caching
                 var arr = Array.CreateInstance(elmType, pks.Length);
                 for (var i = 0; i < pks.Length; i++)
                 {
-                    arr.SetValue(FromBytes(pks[i] as Packet, elmType), i);
+                    if (pks[i] is Packet pk3) arr.SetValue(FromBytes(pk3, elmType), i);
                 }
                 target = arr;
                 return true;
@@ -485,7 +496,7 @@ namespace NewLife.Caching
             var list = GetResponse(ns, ps.Count);
             for (var i = 0; i < list.Count; i++)
             {
-                if (TryChangeType(list[i], ps[i].Type, out var target)) list[i] = target;
+                if (TryChangeType(list[i], ps[i].Type, out var target) && target != null) list[i] = target;
             }
 
             return list.ToArray();
@@ -560,6 +571,8 @@ namespace NewLife.Caching
                 //ps.Add(item.Key.GetBytes());
                 //ps.Add(ToBytes(item.Value));
                 ps.Add(item.Key);
+
+                if (item.Value == null) throw new NullReferenceException();
                 ps.Add(item.Value);
             }
 
@@ -583,7 +596,7 @@ namespace NewLife.Caching
 
             for (var i = 0; i < ks.Length && i < rs.Length; i++)
             {
-                dic[ks[i]] = FromBytes<T>(rs[i] as Packet);
+                if (rs[i] is Packet pk) dic[ks[i]] = FromBytes<T>(pk);
             }
 
             return dic;
@@ -617,7 +630,7 @@ namespace NewLife.Caching
         /// <returns></returns>
         protected virtual Object FromBytes(Packet pk, Type type)
         {
-            if (pk == null) return null;
+            //if (pk == null) return null;
 
             if (type == typeof(Packet)) return pk;
             if (type == typeof(Byte[])) return pk.ToArray();
@@ -666,3 +679,4 @@ namespace NewLife.Caching
         #endregion
     }
 }
+//#nullable restore
