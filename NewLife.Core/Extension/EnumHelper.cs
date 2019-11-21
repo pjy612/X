@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Reflection;
 
 namespace System
@@ -108,6 +109,25 @@ namespace System
             }
 
             return dic;
+        }
+
+        /// <summary>
+        /// 快速对应 Flags 枚举 忽略不存在的值
+        /// </summary>
+        /// <typeparam name="TEnum"></typeparam>
+        /// <param name="flags"></param>
+        /// <returns></returns>
+        public static TEnum ConvertToFlags<TEnum>(this ulong flags) where TEnum : struct, IConvertible, IFormattable
+        {
+            ulong newflags = Enum.GetValues(typeof(TEnum)).Cast<ulong>().Aggregate(0ul, (sumValue, enumValue) =>
+            {
+                if ((flags & enumValue) == enumValue)
+                {
+                    sumValue |= enumValue;
+                }
+                return sumValue;
+            });
+            return (TEnum)Enum.ToObject(typeof(TEnum), newflags);
         }
     }
 }
