@@ -260,7 +260,8 @@ namespace NewLife.Net
             if (pk.Count == 0)
             {
                 // 连续多次空数据，则断开
-                if ((DisconnectWhenEmptyData || _empty++ > 3))
+                //if ((DisconnectWhenEmptyData || _empty++ > 3))
+                if ((DisconnectWhenEmptyData))
                 {
                     Close("收到空数据");
                     Dispose();

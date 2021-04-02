@@ -42,6 +42,8 @@ namespace NewLife.Remoting
 
         /// <summary>接收数据包统计信息</summary>
         public ICounter StatReceive { get; set; }
+        /// <summary>连接复用。默认true，单个Tcp连接在处理某个请求未完成时，可以接收并处理新的请求</summary>
+        public Boolean Multiplex { get; set; } = true;
         #endregion
 
         #region 构造
@@ -322,9 +324,23 @@ namespace NewLife.Remoting
 
             var ss = sender as ISocketRemote;
             var host = this as IApiHost;
-            var rs = host.Process(this, msg);
-            if (rs != null) ss?.SendMessage(rs);
+
+            // 连接复用
+            if (Multiplex)
+            {
+                ThreadPoolX.QueueUserWorkItem(m =>
+                {
+                    var rs = host.Process(this, m);
+                    if (rs != null) ss?.SendMessage(rs);
+                }, msg);
+            }
+            else
+            {
+                var rs = host.Process(this, msg);
+                if (rs != null) ss?.SendMessage(rs);
+            }
         }
+
         #endregion
 
         #region 统计

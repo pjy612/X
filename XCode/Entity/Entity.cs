@@ -1388,7 +1388,6 @@ namespace XCode
                 else
                     obj[fi.Name] = this[fi.Name];
             }
-
             Extends.CopyTo(obj.Extends);
 
             return obj;

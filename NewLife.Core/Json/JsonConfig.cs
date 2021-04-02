@@ -26,8 +26,10 @@ namespace NewLife.Json
     public class JsonConfig<TConfig> : DisposeBase where TConfig : JsonConfig<TConfig>, new()
     {
         #region 静态
+
         private static Boolean _loading;
         private static TConfig _Current;
+
         /// <summary>当前实例。通过置空可以使其重新加载。</summary>
         public static TConfig Current
         {
@@ -58,12 +60,12 @@ namespace NewLife.Json
                 {
                     if (_Current != null) return _Current;
 
-                    config = new TConfig();
+                    config   = new TConfig();
                     _Current = config;
                     if (!config.Load(dcf))
                     {
                         config.ConfigFile = dcf.GetFullPath();
-                        config.SetExpire();  // 设定过期时间
+                        config.SetExpire(); // 设定过期时间
                         config.IsNew = true;
                         config.OnNew();
 
@@ -125,19 +127,20 @@ namespace NewLife.Json
                 var config = new TConfig();
             }
         }
+
         #endregion
 
         #region 属性
+
         /// <summary>配置文件</summary>
         [ScriptIgnore]
         public String ConfigFile { get; set; }
 
         /// <summary>最后写入时间</summary>
-        [ScriptIgnore]
-        private DateTime lastWrite;
+        [ScriptIgnore] private DateTime lastWrite;
+
         /// <summary>过期时间。如果在这个时间之后再次访问，将检查文件修改时间</summary>
-        [ScriptIgnore]
-        private DateTime expire;
+        [ScriptIgnore] private DateTime expire;
 
         /// <summary>是否已更新。通过文件写入时间判断</summary>
         [ScriptIgnore]
@@ -188,9 +191,11 @@ namespace NewLife.Json
         /// <summary>是否新的配置文件</summary>
         [ScriptIgnore]
         public Boolean IsNew { get; set; }
+
         #endregion
 
         #region 构造
+
         /// <summary>销毁</summary>
         /// <param name="disposing"></param>
         protected override void OnDispose(Boolean disposing)
@@ -199,9 +204,11 @@ namespace NewLife.Json
 
             _Timer.TryDispose();
         }
+
         #endregion
 
         #region 加载
+
         /// <summary>加载指定配置文件</summary>
         /// <param name="filename"></param>
         /// <returns></returns>
@@ -234,7 +241,7 @@ namespace NewLife.Json
                 //if (!json.TryRead(GetType(), ref obj)) return false;
 
                 config.ConfigFile = filename;
-                config.SetExpire();  // 设定过期时间
+                config.SetExpire(); // 设定过期时间
                 config.OnLoaded();
 
                 return true;
@@ -249,9 +256,11 @@ namespace NewLife.Json
                 _loading = false;
             }
         }
+
         #endregion
 
         #region 成员方法
+
         /// <summary>从配置文件中读取完成后触发</summary>
         protected virtual void OnLoaded()
         {
@@ -306,6 +315,7 @@ namespace NewLife.Json
         public virtual void Save() => Save(null);
 
         private TimerX _Timer;
+
         /// <summary>异步保存</summary>
         public virtual void SaveAsync()
         {
@@ -313,11 +323,7 @@ namespace NewLife.Json
             {
                 lock (this)
                 {
-                    if (_Timer == null) _Timer = new TimerX(DoSave, null, 1000, 5000)
-                    {
-                        Async = true,
-                        CanExecute = () => _commits > 0,
-                    };
+                    if (_Timer == null) _Timer = new TimerX(DoSave, null, 1000, 5000) {Async = true, CanExecute = () => _commits > 0,};
                 }
             }
 
@@ -325,6 +331,7 @@ namespace NewLife.Json
         }
 
         private Int32 _commits;
+
         private void DoSave(Object state)
         {
             var old = _commits;
@@ -341,16 +348,13 @@ namespace NewLife.Json
 
         private String GetJson()
         {
-            var json = new NewLife.Serialization.Json
-            {
-                Encoding = Encoding.UTF8,
-                UseProperty = true
-            };
+            var json = new NewLife.Serialization.Json {Encoding = Encoding.UTF8, UseProperty = true};
 
             if (_.Debug) json.Log = XTrace.Log;
 
             return this.ToJson(true);
         }
+
         #endregion
     }
 }
