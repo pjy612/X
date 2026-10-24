@@ -1,0 +1,229 @@
+# NewLife.Core 需求文档
+
+> 版本：v12 | 日期：2026-10-19 | 从代码逆向整理
+
+本文档描述 NewLife.Core 核心库的愿景、核心目标和功能方向。完成状态在[功能清单](功能清单.md)中追踪，详细设计在[架构设计](架构设计.md)中展开。
+
+## 1. 背景与愿景
+
+### 1.1 系统定位
+
+NewLife.Core 是 NewLife 组件生态的**基础核心库**，为构建可扩展 .NET 应用程序提供高性能基础设施。支持 .NET Framework 4.5 至 .NET 10.0 全版本。
+
+| 定位维度 | 说明 |
+|----------|------|
+| 目标用户 | .NET 开发者，从 Web 服务到 IoT 设备的全场景 |
+| 核心价值 | 高性能、低分配、跨版本兼容、开箱即用 |
+| 生态位置 | 所有 NewLife 系列组件（XCode/Cube/Remoting/Redis 等）的底层依赖 |
+
+### 1.2 愿景
+
+成为 .NET 生态中最全面、最高性能的基础类库，让开发者在任何 .NET 版本上都能获得一致、高效的底层能力。
+
+## 2. 核心目标
+
+| 编号 | 目标 | 所属层级 | 一句话描述 |
+|------|------|----------|------------|
+| M1 | 基础扩展 | 基础设施 | 类型转换、字符串操作、进程管理等基础工具扩展 |
+| M2 | 日志与追踪 | 基础设施 | 多输出日志框架 + 分布式 APM 链路追踪 |
+| M3 | 定时调度 | 基础设施 | 高精度定时器 + Cron 表达式调度 |
+| M4 | 序列化 | 数据层 | JSON/XML/Binary/CSV/Excel 多格式高性能序列化 |
+| M5 | 配置系统 | 基础设施 | 多源配置框架，支持 JSON/XML/INI/HTTP/Apollo |
+| M6 | 安全加密 | 基础设施 | RSA/AES/SM4/CRC 加解密、哈希校验与 ECDSA 签名 |
+| M7 | 应用框架 | 框架层 | IoC 容器、插件系统、Actor 并发、管道模型、事件总线 |
+| M8 | 缓存系统 | 基础设施 | 统一缓存接口，内存缓存 + Redis 客户端 + 对象池 |
+| M9 | 数据与算法 | 数据层 | 数据包与数据管道、雪花ID、GeoHash、内存数据表、降采样 |
+| M10 | 网络通信 | 通信层 | TCP/UDP/Unix域套接字/HTTP/WebSocket 高性能网络库 |
+| M11 | Web 工具 | 工具层 | JWT 令牌、分布式令牌、HTTP 下载 |
+| M12 | 压缩归档 | 工具层 | Tar/Tar.Gz/7Zip 压缩解压 |
+| M13 | RPC 通信 | 通信层 | HTTP API 客户端、负载均衡、故障转移 |
+
+## 3. 功能需求
+
+### 3.1 M1 基础扩展
+
+- **M1-1 类型转换**：提供 `ToInt()`/`ToBoolean()`/`ToDateTime()` 等高效类型转换扩展方法。
+- **M1-2 字符串扩展**：字符串截取、编码、格式化、空值判断等工具方法。
+- **M1-3 路径扩展**：跨平台路径处理，智能处理多种路径格式。
+- **M1-4 数据扩展**：高效 IO 操作，流与字节数组转换。
+- **M1-5 进程扩展**：简化进程管理，获取进程信息。
+- **M1-6 运行时信息**：应用运行时信息获取，便于调试诊断。
+- **M1-7 可销毁基类**：标准资源释放模式，自动生命周期追踪。
+- **M1-8 反射扩展**：高性能反射工具，快速对象成员读写。
+- **M1-9 拼音库**：高效汉字转拼音，支持全拼和简拼。
+- **M1-10 弱引用委托**：弱引用事件委托，防止内存泄漏。
+- **M1-11 时间提供者**：`TimeProvider` 跨版本统一时间抽象，提供 UTC 时钟、时区、高精度时间戳和计时器。
+- **M1-12 字典数据源**：`IDictionarySource` 对象转名值字典接口，便于序列化传输。
+- **M1-13 机器信息**：`MachineInfo` 获取操作系统名称、版本、硬件信息等，支持 Windows、Linux、Android 和 iOS，单例模式；移动端宿主可通过 `IMachineInfo` 补充设备名、稳定标识与电量。
+
+### 3.2 M2 日志与追踪
+
+- **M2-1 统一日志接口**：`ILog` 核心日志接口，支持多种输出方式。
+- **M2-2 文件日志**：文本文件日志，支持滚动切割。
+- **M2-3 控制台日志**：控制台彩色日志输出。
+- **M2-4 网络日志**：UDP 网络日志，远程集中收集。
+- **M2-5 组合日志**：同时输出到多个日志目标。
+- **M2-6 链路追踪**：`ITracer` 分布式 APM 追踪接口，`DefaultTracer` 集成星尘平台。
+- **M2-7 性能计数器**：`PerfCounter` 性能计数与统计。
+- **M2-8 日志级别控制**：`LevelLog` 按级别过滤日志。
+- **M2-9 全局日志入口**：`XTrace` 静态全局日志入口，便捷的日志门面。
+- **M2-10 ETW 日志监听**：`LogEventListener` 监听 ETW 事件，捕获框架内部日志。
+- **M2-11 OpenTelemetry 输出适配**：`OpenTelemetryTracer` 把 NewLife 埋点转成标准 Activity（net6.0+）。
+- **M2-12 OpenTelemetry 埋点采集**：`OpenTelemetryCollector` 把第三方 ActivitySource 埋点转成星尘埋点（net6.0+）。
+- **M2-13 多语言本地化**：`Localization` 统一异常与日志消息，内置 31 种语言，英文为源文与兜底；`Setting.Language` 可锁定全局语言，`GetLanguages` 输出内置与运行时注册语言的清单（键/自称/英文名/显示名），供管理端生成语言下拉框；`RequestCultureScope` 按 `Accept-Language` 的 q 权重选择最高权重且受支持的语言，全部不支持时保持宿主语言；`HttpServer`/`HttpSession` 默认对每个请求应用该规则，宿主固定语言时以固定语言为准。
+
+### 3.3 M3 定时调度
+
+- **M3-1 高级定时器**：`TimerX` 高精度定时器，支持 Cron 和异步回调。
+- **M3-2 Cron 表达式**：`Cron` 类 Linux 定时任务，支持秒级 7 域。
+- **M3-3 定时调度器**：`TimerScheduler` 批量定时任务调度。
+- **M3-4 线程池扩展**：`ThreadPoolX` 线程池包装器。
+
+### 3.4 M4 序列化
+
+- **M4-1 Span 读取器**：`SpanReader` 零分配高性能二进制流解析器，支持大小端。
+- **M4-2 Span 写入器**：`SpanWriter` 零分配高性能二进制数据写入器，支持大小端与流模式。
+- **M4-3 Span 辅助**：`SpanHelper` Span/ReadOnlySpan 扩展方法集，简化内存操作。
+- **M4-4 池化写入器**：`PooledByteBufferWriter` 基于 ArrayPool 的高效缓冲写入器，支持动态扩容。
+- **M4-5 JSON 序列化**：高性能 JSON 序列化/反序列化。
+- **M4-6 XML 序列化**：XML 序列化与反序列化。
+- **M4-7 二进制序列化**：高性能二进制序列化，支持复杂对象图。
+- **M4-8 Span 序列化**：基于 Span 的零分配高性能序列化。
+- **M4-9 CSV 解析**：`CsvFile` 快速读写 CSV 文件。
+- **M4-10 CSV 数据库**：`CsvDb<T>` 以 CSV 文件为数据库的增删改查。
+- **M4-11 Excel 读写**：`ExcelReader`/`ExcelWriter` 无需 Office 的轻量级 Excel 读写。
+- **M4-12 序列化辅助**：`SerialHelper` 序列化辅助方法，类型名称解析、成员克隆与复制。
+- **M4-13 类型转换器**：`SafeInt64Converter`/`LocalTimeConverter` 自定义 JSON 类型转换器。
+- **M4-14 序列读取器**：`SequenceReader<T>` 跨段顺序读取（低版本框架经垫片补齐，全 TFM 可用），配套 `SequenceReaderHelper` 扩展方法集，见《序列读取器SequenceReader》。
+
+### 3.5 M5 配置系统
+
+- **M5-1 泛型配置基类**：`Config<T>` 单例模式配置基类。
+- **M5-2 JSON 配置**：JSON 格式配置文件读写（默认格式）。
+- **M5-3 XML 配置**：XML 格式配置文件读写。
+- **M5-4 INI 配置**：INI 格式配置文件读写。
+- **M5-5 HTTP 远程配置**：从 HTTP 接口获取配置，适配星尘配置中心。
+- **M5-6 Apollo 配置**：Apollo 配置中心适配器。
+- **M5-7 命令行解析**：`CommandParser` 命令行参数解析。
+- **M5-8 核心配置**：`Setting` 管理组件核心配置（日志、网络等）。
+- **M5-9 文件配置提供者**：`FileConfigProvider` 文件配置基类，支持原子写入与并发安全。
+- **M5-10 系统配置**：`SysConfig` 基于 Config<T> 的系统名称、版本、显示名称等基本设置管理。
+
+### 3.6 M6 安全加密
+
+- **M6-1 统一加密扩展**：`SecurityHelper` RSA/AES/DES/MD5/SHA/CRC 统一方法集。
+- **M6-2 RSA 加密**：`RSAHelper` RSA 非对称加密。
+- **M6-3 DSA 签名**：`DSAHelper` DSA 数字签名。
+- **M6-4 国密 SM4**：`SM4` 国密对称加密。
+- **M6-5 RC4 流加密**：`RC4` 流加密算法。
+- **M6-6 CRC 校验**：`Crc16`/`Crc32` CRC 循环冗余校验。
+- **M6-7 MurmurHash**：`Murmur128` MurmurHash3 128 位哈希。
+- **M6-8 密码策略**：`IPasswordProvider` 密码哈希与验证接口。
+- **M6-9 随机数**：`Rand` 安全随机数生成。
+- **M6-10 加密填充**：`PKCS7PaddingTransform` PKCS7 填充/去填充算法。
+- **M6-11 ASN.1 编解码**：`Asn1`/`Asn1Tags` ASN.1 数据格式编解码。
+- **M6-12 ECDSA 签名**：`ECDsaHelper`/`ECKey` 椭圆曲线数字签名，支持 CNG KeyBlob 与 PEM 密钥，供 JWT ES256/ES384/ES512 等场景使用；v12 起由独立加密扩展包并入核心库。
+
+### 3.7 M7 应用框架
+
+- **M7-1 IoC 容器**：`ObjectContainer` 轻量级依赖注入，兼容 `IServiceProvider`。
+- **M7-2 应用主机**：`Host` 轻量级后台服务托管，支持 Windows 服务和 Linux Systemd。
+- **M7-3 插件框架**：`IPlugin`/`PluginManager` 标准化插件管理，模块化开发。
+- **M7-4 Actor 并发**：`Actor` 并发模型，消息驱动，线程安全。
+- **M7-5 管道模型**：`IPipeline` 双向处理链（已退役，由 `Protocol` + `MessagePump` 协议模式取代，见《消息协议栈》）。
+- **M7-6 延迟队列**：`DeferredQueue` 聚合高频变更并批处理。
+- **M7-7 事件总线**：`IEventBus`/`EventHub` 进程内事件发布订阅。
+- **M7-8 消息接口**：`IMessage` 请求-响应消息接口，承载 `Kind`/`Reply`/`OneWay` 方向语义；消息不再池化。
+
+### 3.8 M8 缓存系统
+
+- **M8-1 统一缓存接口**：`ICache` 标准缓存操作接口（Get/Set/Remove）。
+- **M8-2 内存缓存**：`MemoryCache` 高性能单机内存缓存，支持过期和容量策略。
+- **M8-3 缓存基类**：`Cache` 缓存抽象基类，封装通用缓存操作逻辑。
+- **M8-4 缓存提供者**：`ICacheProvider` 管理多缓存实例。
+- **M8-5 分布式缓存锁**：`CacheLock` 基于缓存的分布式锁。
+- **M8-6 内存队列**：`MemoryQueue<T>` 生产者-消费者队列。
+- **M8-7 对象池**：`Pool<T>` 基于 CAS 的高性能通用对象池。
+- **M8-8 生产者消费者接口**：`IProducerConsumer<T>` 轻量级队列抽象，支持生产消费与确认机制。
+- **M8-9 消息队列事件总线**：`QueueEventBus<T>` 基于缓存队列的分布式事件总线，跨进程发布订阅。
+
+### 3.9 M9 数据与算法
+
+- **M9-1 模型数据接口**：`IModel` 字符串键索引模型属性，替代反射的轻量方案。
+- **M9-2 扩展数据接口**：`IExtend` 对象扩展属性字典，按需挂载临时数据。
+- **M9-3 数据过滤器**：`IFilter` 责任链过滤器模式，支持管道式数据处理。
+- **M9-4 数据包接口**：`IPacket` 零拷贝切片（统一为引用计数共享切片）、链式包接口。
+- **M9-5 数据包实现**：`ArrayPacket`/`OwnerPacket` 等数据包实现；`OwnerPacket` 以引用计数内核管理池化缓冲（共享切片各自释放、引用归零归还），过时 `Packet` 类已删除。
+- **M9-6 数据包编码器**：`IPacketEncoder` 对象与数据包双向转换，支持多种类型自动选择编码策略。
+- **M9-7 环形缓冲区**：`RingBuffer` 通用环形缓冲结构；网络协议组包由数据管道与帧泵承担。
+- **M9-8 雪花 ID**：`Snowflake` 分布式唯一 ID 生成器。
+- **M9-9 经纬度哈希**：`GeoHash` 经纬度编码，用于附近位置搜索。
+- **M9-10 内存数据表**：`DbTable` 内存中的数据表，支持数据处理和分析。
+- **M9-11 分页参数**：`PageParameter` 分页逻辑封装。
+- **M9-12 采样插值框架**：`ISampling`/`IInterpolation`/`AlignModes` 降采样与插值算法抽象接口。
+- **M9-13 时序降采样**：`AverageSampling` 降采样算法。
+- **M9-14 线性插值**：`LinearInterpolation` 线性插值填充算法。
+- **M9-15 数据管道**：`Pipe`/`PipeReader`/`PipeWriter` 字节流缓冲（单写单读、有界背压、零拷贝 `ReadOnlySequence<Byte>` 窗口），命名对齐 `System.IO.Pipelines` 且全 TFM 可用（含 net45），配套 `LimitedReader` 限长读取，见《数据管道Pipe》。
+- **M9-16 向量存储**：`IVectorStore`/`IVectorStoreCollection`/`VectorRecord` 向量集合与 Top-K 相似度检索接口（非泛型简化）。
+
+### 3.10 M10 网络通信
+
+- **M10-1 TCP 服务端**：`TcpServer` 高性能 TCP 服务器，封装会话管理。
+- **M10-2 UDP 服务端**：`UdpServer` UDP 服务器。
+- **M10-3 网络客户端**：`NetClient` 统一 TCP/UDP/Unix 客户端，自动重连。
+- **M10-4 网络会话**：`NetSession` 高级网络会话管理。
+- **M10-5 编解码管道**：`SrmpCodec`/`LengthFieldCodec` 粘包拆包（编解码统一为无状态 `IMessageCodec`，旧 `StandardCodec` 处理器族已退役；帧泵见 M10-18）。
+- **M10-6 JSON 编解码**：原 `JsonCodec` 已随 Handlers 处理器体系整删；JSON 负载由应用层序列化承担，不再内置网络 JSON 编解码器。
+- **M10-7 WebSocket 编解码**：`WebSocketCodec` WebSocket 协议编解码。
+- **M10-8 HTTP 服务端**：`HttpServer` 轻量级 HTTP 服务器，适合嵌入式/IoT。
+- **M10-9 HTTP 客户端**：`TinyHttpClient` 内网极简 HTTP 客户端，仅支持 HTTP/1.1 基础子集（http/https、KeepAlive、定长体与分块传输、整次请求超时、重定向）；1xx 临时响应、非 chunked 传输编码、压缩、Cookie、认证、代理、连接池与 RPC 均不支持（遇到显式抛异常，RPC 改用 `ApiHttpClient`）。
+- **M10-10 WebSocket**：`WebSocketClient` 客户端（Net）+ `WebSocket`/`WebSocketHandler` 服务端（Http），接收侧按 RFC 6455 重组分片（超限按 1009 失败连接）。
+- **M10-11 HTTP 路由**：`HttpRouter` HTTP 请求路由匹配与分发。
+- **M10-12 HTTP 中间件**：`CorsMiddleware`/`ErrorHandlerMiddleware` 等 HTTP 中间件管道。
+- **M10-13 分割粘包处理器**：`SplitDataCodec` 按分割字节处理粘包拆包。
+- **M10-14 消息匹配队列**：`IMatchQueue` 请求响应包配对，支持超时清理。
+- **M10-15 DNS 解析处理器**：`DnsHttpHandler` 支持自定义 DNS 解析与多 IP 轮询的 HttpClient 处理器。
+- **M10-16 APM 追踪处理器**：`HttpTraceHandler` 支持链路追踪的 HttpClient 处理器。
+- **M10-17 Unix 域套接字**：`unix://` 路径传输（`NetUri` 扩展 + AF_UNIX Socket），`NetServer`/`NetClient`/`HttpServer` 支持，适用于容器化 Nginx 后端与同机进程间 RPC。
+- **M10-18 消息帧泵**：`MessagePump` 在数据管道上按 `IMessageCodec` 定界消息帧，头部到齐即交付（小帧零拷贝、大帧流式体），协议实例无状态可跨连接共享，见《消息协议栈》。
+
+### 3.11 M11 Web 工具
+
+- **M11-1 JWT 令牌**：`JwtBuilder` JWT 令牌生成、解码、验证。
+- **M11-2 分布式令牌**：`TokenProvider` 分布式数字签名令牌。
+- **M11-3 HTTP 下载**：`WebClientX` 增强型 HTTP 下载，多线程断点续传。
+- **M11-4 插件辅助**：`PluginHelper` 插件加载与配置辅助工具。
+- **M11-5 对象存储客户端**：`EasyClient` + `IObjectStorage` + `IObjectInfo` 文件存储 HTTP 客户端，对接 EasyIO 或阿里云 OSS。
+- **M11-6 令牌 HTTP 过滤器**：`TokenHttpFilter` HTTP 请求自动注入令牌，拦截 401/403 自动续期。
+
+### 3.12 M12 压缩归档
+
+- **M12-1 Tar 归档**：`TarFile` Tar/Tar.Gz 归档操作。
+- **M12-2 7Zip 压缩**：`SevenZip` 7z 压缩解压。
+
+### 3.13 M13 RPC 通信
+
+- **M13-1 HTTP API 客户端**：`ApiHttpClient` 多节点 API 客户端。
+- **M13-2 负载均衡**：`ILoadBalancer` 接口，故障转移/加权轮询/竞速三种策略。
+- **M13-3 服务解析**：`IServiceResolver` 服务发现与客户端实例管理。
+- **M13-4 API 辅助**：`ApiHelper` API 调用辅助方法。
+
+## 4. 🧊 暂缓清单
+
+| 功能 | 暂缓理由 | 解冻前提 |
+|------|----------|----------|
+| 百度地图/高德地图 | 已提取到独立 NuGet 包 | 独立包维护稳定后评估是否回迁 |
+| 阿里云 OSS（完整 SDK） | 核心库保留 `IObjectStorage` 接口和 `EasyClient` 轻量实现；完整 SDK 在独立包 | — |
+| 表达式计算（逆波兰、数学表达式） | 已提取到独立 NuGet 包 | 同上 |
+| OAuth 客户端/服务端 | 已提取到独立 NuGet 包 | 同上 |
+| 布隆过滤器 | 已提取到独立 NuGet 包 | 同上 |
+| 字典缓存 DictionaryCache | 已提取到独立包 | 同上 |
+
+## 5. 不做什么
+
+- **完整的 Redis 客户端**：已提取到 `NewLife.Redis` 独立包，核心库仅保留 `ICache` 接口和 `MemoryCache`。
+- **完整的 RPC 服务端/客户端**：已提取到 `NewLife.Remoting` 独立包，核心库仅保留 `IApiClient` 接口和 `ApiHttpClient`。
+- **ORM/数据库操作**：属于 `NewLife.XCode` 包范畴。
+- **Web 管理后台**：属于 `NewLife.Cube` 包范畴。
+- **MQTT/Modbus/IoT 协议**：已独立为 `NewLife.MQTT`/`NewLife.Modbus`/`NewLife.IoT` 包。
+- **脚本引擎 ScriptEngine**：动态编译引擎（`System.CodeDom`），因平台兼容性原因（仅 Windows）和代码生成安全风险，不再作为核心库功能维护。现有代码保留但不再推荐使用。

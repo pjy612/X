@@ -1,32 +1,136 @@
 ﻿using System.Collections;
+using System.Diagnostics.CodeAnalysis;
+using System.Collections.Concurrent;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
+using NewLife.Model;
 using NewLife.Reflection;
 using NewLife.Remoting;
 
 namespace NewLife.Http;
 
 /// <summary>控制器处理器</summary>
+/// <remarks>
+/// 将请求路由到控制器类型的指定方法，支持依赖注入创建控制器实例。
+/// 路径格式：/{ControllerName}/{MethodName}
+///
+/// 控制器可通过以下方式获取当前 IHttpContext：
+/// 
+/// 1. 方法参数类型注入（推荐）：方法声明 IHttpContext 或 IServiceProvider 类型参数，自动注入
+/// <code>
+/// public String Info(IHttpContext ctx, String name) { var ua = ctx.Request.Headers["User-Agent"]; }
+/// </code>
+/// 
+/// 2. 构造函数 DI 注入：控制器构造函数声明 IHttpContext 参数，由当前请求的服务提供者解析
+/// <code>
+/// public class MyController(IHttpContext ctx) { public String Info() => ctx.Path; }
+/// </code>
+/// 
+/// 3. IHttpController 接口：实现该接口后 Context 属性自动填充
+/// <code>
+/// public class MyController : IHttpController { public IHttpContext? Context { get; set; } }
+/// </code>
+/// 
+/// 4. 静态访问：DefaultHttpContext.Current（仅同步代码，async 场景不可靠）
+/// </remarks>
 public class ControllerHandler : IHttpHandler
 {
     #region 属性
     /// <summary>控制器类型</summary>
-    public Type ControllerType { get; set; }
+    public Type? ControllerType { get; set; }
+
+    /// <summary>挂载路径前缀，如 /api/user/</summary>
+    /// <remarks>
+    /// 由 MapController 写入，用于从请求路径中剪掉前缀后取出操作方法名。
+    /// 为空时按旧语义定位：控制器名占一段，方法名位于路径第 3 段。
+    /// </remarks>
+    public String? Path { get; set; }
+
+    private readonly ConcurrentDictionary<String, MethodInfo?> _methods = new();
     #endregion
 
-    /// <summary>处理请求</summary>
-    /// <param name="context"></param>
-    public virtual void ProcessRequest(IHttpContext context)
+    /// <summary>异步处理请求</summary>
+    /// <param name="context">Http上下文</param>
+    /// <returns>处理任务</returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "控制器动作经反射查找与调用；AOT 下请使用源生成 HttpDispatch 动作注册表（见分析稿 §3）")]
+    public virtual async Task ProcessRequestAsync(IHttpContext context)
     {
-        var ss = context.Path.Split('/');
-        var methodName = ss.Length >= 3 ? ss[2] : null;
+        var type = ControllerType;
+        if (type == null) return;
 
-        var controller = ControllerType.CreateInstance();
+        // 取操作方法名：先剪掉挂载前缀（如 /api/user/），再取剩余路径的第一段。
+        // 旧实现固定取 Split('/')[2]，隐含“控制器名恰好占一段”的假设，
+        // 一旦 MapController<T>("/api/user") 注册多段前缀，取到的将是路径中间那段而不是方法名。
+        var path = context.Path;
+        var prefix = Path;
+        if (prefix.IsNullOrEmpty())
+        {
+            // 未声明前缀（手工注册 Routes 的场景）沿用旧语义：跳过控制器名一段
+            var index = path.IndexOf('/', 1);
+            path = index >= 0 ? path[(index + 1)..] : String.Empty;
+        }
+        else if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            path = path[prefix.Length..];
+        }
 
-        var method = methodName == null ? null : ControllerType.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        if (method == null) throw new ApiException(ApiCode.NotFound, $"控制器[{ControllerType.FullName}]内无法找到操作[{methodName}]");
+        var ss = path.TrimStart('/').Split('/');
+        var methodName = ss.Length > 0 && ss[0].Length > 0 ? ss[0] : null;
 
-        var result = controller.InvokeWithParams(method, context.Parameters as IDictionary);
+        // 优先使用服务提供者创建控制器对象，以便控制器构造函数注入
+        // （HttpSession 已通过 HttpServiceProvider 将 IHttpContext 加入 DI 解析链）
+        var serviceProvider = context.ServiceProvider;
+        var controller = serviceProvider?.GetService(type) ?? serviceProvider?.CreateInstance(type) ?? type.CreateInstance();
 
-        context.Response.SetResult(result);
+        // 注入 IHttpContext 到控制器（若实现了 IHttpController 接口）
+        if (controller is IHttpController httpController)
+            httpController.Context = context;
+
+        // 源生成器优先：编译期为 MapController 注册的控制器生成静态分发表，命中则直接强类型调用，避免方法查找、参数绑定与调用的反射开销
+        if (methodName != null && controller != null)
+        {
+            var dispatchers = HttpDispatchTable.TryGet(type);
+            if (dispatchers != null && dispatchers.TryGetValue(methodName, out var dispatcher))
+            {
+                await dispatcher(controller, context).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        // 查找方法，增加缓存
+        MethodInfo? method = null;
+        if (methodName != null && !_methods.TryGetValue(methodName, out method))
+        {
+            // 仅允许公开方法：旧实现含 NonPublic，private/internal 方法可被 URL 直接调用，绕过可见性保护。
+            // 同时排除继承自 Object 的通用方法（GetType/ToString 等），避免把框架方法当成业务操作
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            method = Array.Find(methods, m => m.Name.EqualIgnoreCase(methodName) && m.DeclaringType != typeof(Object));
+
+            // 只缓存命中项：把未找到的方法名（null）也缓存，任意随机方法名都能让字典无界增长
+            if (method != null) _methods[methodName] = method;
+        }
+        if (method == null) throw new ApiException(ApiCode.NotFound, L.T("Cannot find operation [{0}] within controller [{1}]", methodName, type.FullName));
+
+        var args = ParameterBinder.Bind(method, context);
+        Object? result;
+        try
+        {
+            result = method.Invoke(controller, args);
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            // 同步方法里的业务异常会被反射包成 TargetInvocationException；
+            // 还原原始异常，让 ApiException/HttpException 的状态码映射与日志看到真实业务错误（异步路径经 awaiter 本来就是原始异常）
+            ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+            throw;
+        }
+        if (result is Task task)
+        {
+            // 异步操作方法（含任意签名）：等任务完成后再取结果，不再同步阻塞等待
+            await task.ConfigureAwait(false);
+            result = TaskHelper.GetResult(task);
+        }
+        if (result != null)
+            context.Response.SetResult(result);
     }
 }

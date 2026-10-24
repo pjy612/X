@@ -21,15 +21,16 @@ bld/
 *.htm
 *.nuspec
 *.nupkg
-/XCode/Membership/Config
-/XCode/Sharding/Config
-/XCode/Demo/Config
-/XCode/Membership
-/Keys
-/Avatars
-/BinSamples
-/Samples/SplitTableOrDatabase/Config
+[Cc]onfig/
+[Ll]og/
+!XUnitTest.Core/Log/
+!NewLife.Core/Log/
+BenchmarkDotNet.Artifacts/
+/XUnitTest.Core/TestResults
 /TestResults
-/BinCoreTest
-/BinXCodeTest
-/XUnitTest.XCode/TestEntity/Config
+/Benchmark/NetLoadTest/results
+/*-wt/
+/.wt-*/
+
+# 审计/分析类临时产物（仅本地保留，不入库）
+/.tmp/

@@ -1,9 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Buffers;
 using System.Globalization;
-using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Text;
 using NewLife.Collections;
 
@@ -29,7 +26,7 @@ public static class IOHelper
     /// <param name="inStream">输入流</param>
     /// <param name="outStream">输出流。如果不指定，则内部实例化一个内存流</param>
     /// <remarks>返回输出流，注意此时指针位于末端</remarks>
-    public static Stream Compress(this Stream inStream, Stream outStream = null)
+    public static Stream Compress(this Stream inStream, Stream? outStream = null)
     {
         var ms = outStream ?? new MemoryStream();
 
@@ -51,7 +48,7 @@ public static class IOHelper
     /// <param name="inStream">输入流</param>
     /// <param name="outStream">输出流。如果不指定，则内部实例化一个内存流</param>
     /// <remarks>返回输出流，注意此时指针位于末端</remarks>
-    public static Stream Decompress(this Stream inStream, Stream outStream = null)
+    public static Stream Decompress(this Stream inStream, Stream? outStream = null)
     {
         var ms = outStream ?? new MemoryStream();
 
@@ -92,7 +89,7 @@ public static class IOHelper
     /// <param name="inStream">输入流</param>
     /// <param name="outStream">输出流。如果不指定，则内部实例化一个内存流</param>
     /// <remarks>返回输出流，注意此时指针位于末端</remarks>
-    public static Stream CompressGZip(this Stream inStream, Stream outStream = null)
+    public static Stream CompressGZip(this Stream inStream, Stream? outStream = null)
     {
         var ms = outStream ?? new MemoryStream();
 
@@ -113,7 +110,7 @@ public static class IOHelper
     /// <param name="inStream">输入流</param>
     /// <param name="outStream">输出流。如果不指定，则内部实例化一个内存流</param>
     /// <remarks>返回输出流，注意此时指针位于末端</remarks>
-    public static Stream DecompressGZip(this Stream inStream, Stream outStream = null)
+    public static Stream DecompressGZip(this Stream inStream, Stream? outStream = null)
     {
         var ms = outStream ?? new MemoryStream();
 
@@ -186,17 +183,15 @@ public static class IOHelper
     public static Byte[] ReadArray(this Stream des)
     {
         var len = des.ReadEncodedInt();
-        if (len <= 0) return new Byte[0];
+        if (len <= 0) return [];
 
         // 避免数据错乱超长
         //if (des.CanSeek && len > des.Length - des.Position) len = (Int32)(des.Length - des.Position);
-        if (des.CanSeek && len > des.Length - des.Position) throw new XException("ReadArray错误，变长数组长度为{0}，但数据流可用数据只有{1}", len, des.Length - des.Position);
+        if (des.CanSeek && len > des.Length - des.Position) throw new XException("ReadArray error, variable length array length is {0}, but the available data for the data stream is only {1}", len, des.Length - des.Position);
 
-        if (len > MaxSafeArraySize) throw new XException("安全需要，不允许读取超大变长数组 {0:n0}>{1:n0}", len, MaxSafeArraySize);
+        if (len > MaxSafeArraySize) throw new XException("Security required, reading large variable length arrays is not allowed {0:n0}>{1:n0}", len, MaxSafeArraySize);
 
-        var buf = new Byte[len];
-        des.Read(buf, 0, buf.Length);
-        return buf;
+        return des.ReadExactly(len);
     }
 
     /// <summary>写入Unix格式时间，1970年以来秒数，绝对时间，非UTC</summary>
@@ -216,9 +211,9 @@ public static class IOHelper
     /// <returns></returns>
     public static DateTime ReadDateTime(this Stream stream)
     {
-        var buf = new Byte[4];
-        stream.Read(buf, 0, 4);
-        var seconds = (Int32)buf.ToUInt32();
+        _encodes ??= new Byte[16];
+        stream.ReadExactly(_encodes, 0, 4);
+        var seconds = (Int32)_encodes.ToUInt32();
 
         return seconds.ToDateTime();
     }
@@ -230,7 +225,7 @@ public static class IOHelper
     /// <returns>返回复制的总字节数</returns>
     public static Byte[] ReadBytes(this Byte[] src, Int32 offset, Int32 count)
     {
-        if (count == 0) return new Byte[0];
+        if (count == 0) return [];
 
         // 即使是全部，也要复制一份，而不只是返回原数组，因为可能就是为了复制数组
         if (count < 0) count = src.Length - offset;
@@ -255,9 +250,189 @@ public static class IOHelper
         Buffer.BlockCopy(src, srcOffset, dst, dstOffset, count);
         return count;
     }
+
+    /// <summary>从一个数据流复制特定长度数据到另一个数据流</summary>
+    /// <param name="source">源数据流</param>
+    /// <param name="destination">目标数据流</param>
+    /// <param name="length">要复制的数据长度</param>
+    /// <param name="bufferSize">缓冲区大小</param>
+    public static void CopyTo(this Stream source, Stream destination, Int64 length, Int32 bufferSize)
+    {
+        if (length <= 0) return;
+
+        using var buffer = Pool.Rent(bufferSize);
+
+        while (length > 0)
+        {
+            var bytesRead = source.Read(buffer, 0, (Int32)Math.Min(buffer.Length, length));
+            if (bytesRead == 0) break;
+
+            destination.Write(buffer, 0, bytesRead);
+            length -= bytesRead;
+        }
+    }
     #endregion
 
     #region 数据流转换
+    /// <summary>从流中完全读取数据，直到指定大小或者到达流结束</summary>
+    /// <remarks>
+    /// 主要为了对抗net6开始对Stream.Read的微调。
+    /// https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/6.0/partial-byte-reads-in-streams
+    /// 功能：尝试从 <paramref name="stream"/> 连续读取 <paramref name="count"/> 个字节写入 <paramref name="buffer"/>（起始于 <paramref name="offset"/>）。若底层流在填满前结束，则抛出 <see cref="EndOfStreamException"/>。
+    /// 设计背景：.NET 6 起基础库强调 <c>Stream.Read</c> 可能返回“部分数据”（partial read），调用方需自行循环；旧代码里大量“假设一次读满”逻辑会潜在失效。该方法提供一个语义清晰的“精准填充”入口，避免重复样板循环。
+    /// 内部实现：调用 <see cref="ReadAtLeast(Stream,Byte[],Int32,Int32,Int32,Boolean)"/>，将 <c>minimumBytes = count</c> 且 <c>throwOnEndOfStream = true</c>，保证要么读取足量要么抛异常。
+    /// 性能：仅在调用方提供的缓冲区内循环读取，无额外数组租借 / 复制；适合高频固定长度结构（协议头、长度前缀、魔数校验等）。
+    /// 使用建议：
+    /// <list type="bullet">
+    /// <item><description>需严格保证字节数 → 使用本方法。</description></item>
+    /// <item><description>允许不足（探测 EOF / 非阻塞流）→ 使用 <see cref="ReadAtLeast(Stream,Byte[],Int32,Int32,Int32,Boolean)"/> 并设置 <c>throwOnEndOfStream = false</c>。</description></item>
+    /// <item><description>需分配新数组 → 使用 <see cref="ReadExactly(Stream, Int64)"/> 重载。</description></item>
+    /// </list>
+    /// 边界：当 <paramref name="count"/> == 0 时立即返回 0；参数越界/空引用异常行为与 CLR / <c>Stream.Read</c> 保持一致。
+    /// 兼容：在所有支持的目标框架上行为一致，避免不同运行时对 <c>Read</c> 语义的潜在差异。
+    /// </remarks>
+    /// <param name="stream">源数据流，必须可读。</param>
+    /// <param name="buffer">目标缓冲区，必须有足够空间容纳 <paramref name="offset"/> + <paramref name="count"/>。</param>
+    /// <param name="offset">写入起始偏移。</param>
+    /// <param name="count">期望读取且必须精确填充的字节数 (>=0)。</param>
+    /// <returns>成功时返回读取的总字节数（恒等于 <paramref name="count"/>；当 <paramref name="count"/> == 0 返回 0）。</returns>
+    public static Int32 ReadExactly(this Stream stream, Byte[] buffer, Int32 offset, Int32 count) => ReadAtLeast(stream, buffer, offset, count, count, true);
+
+    /// <summary>读取指定数量字节数据（精确填充）。</summary>
+    /// <param name="stream">源数据流，必须可读。</param>
+    /// <param name="count">期望读取的精确字节数，需 >= 0。</param>
+    /// <returns>长度恰为 <paramref name="count"/> 的新字节数组。</returns>
+    public static Byte[] ReadExactly(this Stream stream, Int64 count)
+    {
+        var buf = new Byte[count];
+        ReadAtLeast(stream, buf, 0, buf.Length, (Int32)count, true);
+        return buf;
+    }
+
+    /// <summary>从流中读取数据到缓冲区，至少读取指定字节数</summary>
+    /// <remarks>
+    /// 功能：在不超过 <paramref name="count"/> 的前提下，尽量读取不少于 <paramref name="minimumBytes"/> 个字节，并返回本次实际读取量。若底层流过早结束且未满足最小需求，根据 <paramref name="throwOnEndOfStream"/> 决定是否抛出 <see cref="EndOfStreamException"/>。
+    /// <para>性能背景：.NET (7/8+) 运行库只提供基于 <c>Span&lt;Byte&gt;</c> 的 <c>Stream.ReadAtLeast(Span&lt;Byte&gt; buffer, int minimumBytes, bool throwOnEndOfStream)</c> 重载。对于仅覆写传统 <c>Read(byte[], int, int)</c> 的自定义流，基类 <c>Read(Span&lt;Byte&gt;)</c> 默认实现流程：</para>
+    /// <list type="number">
+    /// <item><description>向 <see cref="ArrayPool{T}"/> 租借临时字节数组。</description></item>
+    /// <item><description>调用旧版 <c>Read(byte[], int, int)</c> 填充。</description></item>
+    /// <item><description>将数据从临时数组拷贝回调用方 <c>Span</c>。</description></item>
+    /// <item><description>归还租借数组。</description></item>
+    /// </list>
+    /// 该过程引入额外租借与复制，在高频/小块读取场景下有额外开销与 GC 压力。本实现直接使用调用方传入的 <see cref="Byte"/> 数组（携带 offset/count），避免：
+    /// <list type="bullet">
+    /// <item><description>额外数组租借与释放</description></item>
+    /// <item><description>二次内存复制</description></item>
+    /// <item><description>小块循环读取的池命中成本</description></item>
+    /// </list>
+    /// 语义：与 .NET ReadAtLeast 语义对齐（满足最小值，否则可选抛异常），但只提供数组版以复用现有缓冲策略（对象池 / 环形缓冲 / 协议解析缓存）。
+    /// 参数与返回：
+    /// <list type="bullet">
+    /// <item><description><paramref name="minimumBytes"/> 必须处于 [0, count]</description></item>
+    /// <item><description>返回值范围 [0, count]</description></item>
+    /// <item><description><paramref name="minimumBytes"/> == 0 或 <paramref name="count"/> == 0 时快速返回 0</description></item>
+    /// <item><description>若 <paramref name="throwOnEndOfStream"/> = true 且未达最小值，抛出 <see cref="EndOfStreamException"/></description></item>
+    /// </list>
+    /// 使用建议：
+    /// <list type="bullet">
+    /// <item><description>需要“尽量一次填满协议头 / 固定长度结构”时使用</description></item>
+    /// <item><description>必须严格保证长度：设置 <paramref name="throwOnEndOfStream"/> = true</description></item>
+    /// <item><description>允许提前结束（如文件截断/半关闭连接）：设置为 false 并检查返回值</description></item>
+    /// </list>
+    /// 边界与校验：显式检查偏移、长度、最小值；无内部线程安全；调用方需保证并发模型正确。
+    /// </remarks>
+    /// <param name="stream">源数据流</param>
+    /// <param name="buffer">目标缓冲区</param>
+    /// <param name="offset">写入起始偏移</param>
+    /// <param name="count">最多尝试读取的字节数（上限）</param>
+    /// <param name="minimumBytes">期望至少读取的字节数（下限）。若超过 <paramref name="count"/> 将被截断</param>
+    /// <param name="throwOnEndOfStream">到达流末尾且未满足最小字节数时是否抛异常</param>
+    /// <returns>实际读取的字节数，范围 [0, count]</returns>
+    /// <exception cref="EndOfStreamException">实际可用数据不足 <paramref name="count"/>。</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> 为负值（由 CLR 在数组分配时触发）。</exception>
+    public static Int32 ReadAtLeast(this Stream stream, Byte[] buffer, Int32 offset, Int32 count, Int32 minimumBytes, Boolean throwOnEndOfStream = true)
+    {
+        if (minimumBytes < 0) throw new ArgumentOutOfRangeException(nameof(minimumBytes));
+        if (minimumBytes > count) throw new ArgumentOutOfRangeException(nameof(minimumBytes));
+
+        // 快速返回：无需最小读取或没有读取空间。
+        if (minimumBytes == 0 || count == 0) return 0;
+
+        var totalRead = 0;
+        while (totalRead < minimumBytes)
+        {
+            var bytesRead = stream.Read(buffer, offset + totalRead, count - totalRead);
+            if (bytesRead == 0)
+            {
+                // 到达 EOF，若未满足 minimumBytes 并要求抛异常，则抛出（与 .NET ReadAtLeast 一致）。
+                if (throwOnEndOfStream) throw new EndOfStreamException(L.T("Unable to read the required minimum number of bytes. Expected {0}, actual {1}.", minimumBytes, totalRead));
+                break;
+            }
+            totalRead += bytesRead;
+        }
+
+        return totalRead;
+    }
+
+    /// <summary>异步从流中完全读取数据，精确填充指定字节数</summary>
+    /// <param name="stream">源数据流，必须可读。</param>
+    /// <param name="buffer">目标缓冲区，必须有足够空间容纳 <paramref name="offset"/> + <paramref name="count"/>。</param>
+    /// <param name="offset">写入起始偏移。</param>
+    /// <param name="count">期望读取且必须精确填充的字节数 (>=0)。</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>成功时返回读取的总字节数（恒等于 <paramref name="count"/>；当 <paramref name="count"/> == 0 返回 0）。</returns>
+    public static Task<Int32> ReadExactlyAsync(this Stream stream, Byte[] buffer, Int32 offset, Int32 count, CancellationToken cancellationToken = default) => ReadAtLeastAsync(stream, buffer, offset, count, count, true, cancellationToken);
+
+    /// <summary>异步读取指定数量字节数据（精确填充）。</summary>
+    /// <param name="stream">源数据流，必须可读。</param>
+    /// <param name="count">期望读取的精确字节数，需 >= 0。</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>长度恰为 <paramref name="count"/> 的新字节数组。</returns>
+    public static async Task<Byte[]> ReadExactlyAsync(this Stream stream, Int64 count, CancellationToken cancellationToken = default)
+    {
+        var buf = new Byte[count];
+        await ReadAtLeastAsync(stream, buf, 0, buf.Length, (Int32)count, true, cancellationToken).ConfigureAwait(false);
+        return buf;
+    }
+
+    /// <summary>异步从流中读取数据到缓冲区，至少读取指定字节数</summary>
+    /// <remarks>
+    /// 与同步版 <see cref="ReadAtLeast"/> 语义一致，内部使用 <see cref="Stream.ReadAsync(Byte[], Int32, Int32, CancellationToken)"/> 实现异步读取，适用于网络流等异步场景。
+    /// </remarks>
+    /// <param name="stream">源数据流</param>
+    /// <param name="buffer">目标缓冲区</param>
+    /// <param name="offset">写入起始偏移</param>
+    /// <param name="count">最多尝试读取的字节数（上限）</param>
+    /// <param name="minimumBytes">期望至少读取的字节数（下限）</param>
+    /// <param name="throwOnEndOfStream">到达流末尾且未满足最小字节数时是否抛异常</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>实际读取的字节数，范围 [0, count]</returns>
+    /// <exception cref="EndOfStreamException">实际可用数据不足 <paramref name="minimumBytes"/>。</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="minimumBytes"/> 为负值或超过 <paramref name="count"/>。</exception>
+    public static async Task<Int32> ReadAtLeastAsync(this Stream stream, Byte[] buffer, Int32 offset, Int32 count, Int32 minimumBytes, Boolean throwOnEndOfStream = true, CancellationToken cancellationToken = default)
+    {
+        if (minimumBytes < 0) throw new ArgumentOutOfRangeException(nameof(minimumBytes));
+        if (minimumBytes > count) throw new ArgumentOutOfRangeException(nameof(minimumBytes));
+
+        // 快速返回：无需最小读取或没有读取空间。
+        if (minimumBytes == 0 || count == 0) return 0;
+
+        var totalRead = 0;
+        while (totalRead < minimumBytes)
+        {
+            var bytesRead = await stream.ReadAsync(buffer, offset + totalRead, count - totalRead, cancellationToken).ConfigureAwait(false);
+            if (bytesRead == 0)
+            {
+                // 到达 EOF，若未满足 minimumBytes 并要求抛异常，则抛出（与 .NET ReadAtLeast 一致）。
+                if (throwOnEndOfStream) throw new EndOfStreamException(L.T("Unable to read the required minimum number of bytes. Expected {0}, actual {1}.", minimumBytes, totalRead));
+                break;
+            }
+            totalRead += bytesRead;
+        }
+
+        return totalRead;
+    }
+
     /// <summary>数据流转为字节数组</summary>
     /// <remarks>
     /// 针对MemoryStream进行优化。内存流的Read实现是一个个字节复制，而ToArray是调用内部内存复制方法
@@ -269,27 +444,18 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] ReadBytes(this Stream stream, Int64 length)
     {
-        if (stream == null) return null;
-        if (length == 0) return new Byte[0];
+        //if (stream == null) return null;
+        if (length == 0) return [];
 
         if (length > 0 && stream.CanSeek && stream.Length - stream.Position < length)
-            throw new XException("无法从长度只有{0}的数据流里面读取{1}字节的数据", stream.Length - stream.Position, length);
+            throw new XException("Unable to read {1} bytes of data from a data stream with a length of only {0}", stream.Length - stream.Position, length);
 
         // 如果指定长度超过数据流长度，就让其报错，因为那是调用者所期望的值
         if (length > 0)
         {
             //!!! Stream.Read 的官方设计从未承诺填满缓冲区，需要用户自己多次读取
             // https://docs.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/6.0/partial-byte-reads-in-streams
-            var p = 0;
-            var buf = new Byte[length];
-            while (true)
-            {
-                var n = stream.Read(buf, p, buf.Length - p);
-                if (n == 0 || p + n == buf.Length) break;
-
-                p += n;
-            }
-            return buf;
+            return stream.ReadExactly(length);
         }
 
         // 支持搜索
@@ -298,29 +464,27 @@ public static class IOHelper
             // 如果指定长度超过数据流长度，就让其报错，因为那是调用者所期望的值
             length = (Int32)(stream.Length - stream.Position);
 
-            var buf = new Byte[length];
-            stream.Read(buf, 0, buf.Length);
-            return buf;
+            return stream.ReadExactly(length);
         }
 
         // 如果要读完数据，又不支持定位，则采用内存流搬运
         var ms = Pool.MemoryStream.Get();
         stream.CopyTo(ms);
 
-        return ms.Put(true);
+        return ms.Return(true);
     }
 
     /// <summary>流转换为字符串</summary>
     /// <param name="stream">目标流</param>
     /// <param name="encoding">编码格式</param>
     /// <returns></returns>
-    public static String ToStr(this Stream stream, Encoding encoding = null)
+    public static String ToStr(this Stream stream, Encoding? encoding = null)
     {
-        if (stream == null) return null;
+        if (stream == null) return String.Empty;
         encoding ??= Encoding.UTF8;
 
         var buf = stream.ReadBytes(-1);
-        if (buf == null || buf.Length <= 0) return null;
+        if (buf == null || buf.Length <= 0) return String.Empty;
 
         // 可能数据流前面有编码字节序列，需要先去掉
         var idx = 0;
@@ -339,17 +503,17 @@ public static class IOHelper
     /// <param name="offset">字节数组中的偏移</param>
     /// <param name="count">字节数组中的查找长度</param>
     /// <returns></returns>
-    public static String ToStr(this Byte[] buf, Encoding encoding = null, Int32 offset = 0, Int32 count = -1)
+    public static String ToStr(this Byte[] buf, Encoding? encoding = null, Int32 offset = 0, Int32 count = -1)
     {
-        if (buf == null || buf.Length <= 0 || offset >= buf.Length) return null;
-        if (encoding == null) encoding = Encoding.UTF8;
+        if (buf == null || buf.Length <= 0 || offset >= buf.Length) return String.Empty;
+        encoding ??= Encoding.UTF8;
 
         var size = buf.Length - offset;
         if (count < 0 || count > size) count = size;
 
         // 可能数据流前面有编码字节序列，需要先去掉
         var idx = 0;
-        var preamble = encoding?.GetPreamble();
+        var preamble = encoding.GetPreamble();
         if (preamble != null && preamble.Length > 0 && buf.Length >= offset + preamble.Length)
         {
             if (buf.Skip(offset).Take(preamble.Length).SequenceEqual(preamble)) idx = preamble.Length;
@@ -360,6 +524,11 @@ public static class IOHelper
     #endregion
 
     #region 数据转整数
+    /// <summary>目标字节序与主机字节序是否相反</summary>
+    /// <param name="isLittleEndian">目标是否小端</param>
+    /// <returns></returns>
+    private static Boolean IsReverseEndian(Boolean isLittleEndian) => isLittleEndian != BitConverter.IsLittleEndian;
+
     /// <summary>从字节数据指定位置读取一个无符号16位整数</summary>
     /// <param name="data"></param>
     /// <param name="offset">偏移</param>
@@ -380,14 +549,10 @@ public static class IOHelper
     /// <returns></returns>
     public static UInt32 ToUInt32(this Byte[] data, Int32 offset = 0, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.ToUInt32(data, offset);
-
-        // BitConverter得到小端，如果不是小端字节顺序，则倒序
-        if (offset > 0) data = data.ReadBytes(offset, 4);
         if (isLittleEndian)
-            return (UInt32)(data[0] | data[1] << 8 | data[2] << 0x10 | data[3] << 0x18);
-        else
-            return (UInt32)(data[0] << 0x18 | data[1] << 0x10 | data[2] << 8 | data[3]);
+            return (UInt32)(data[offset] | data[offset + 1] << 8 | data[offset + 2] << 0x10 | data[offset + 3] << 0x18);
+
+        return (UInt32)(data[offset] << 0x18 | data[offset + 1] << 0x10 | data[offset + 2] << 8 | data[offset + 3]);
     }
 
     /// <summary>从字节数据指定位置读取一个无符号64位整数</summary>
@@ -397,21 +562,46 @@ public static class IOHelper
     /// <returns></returns>
     public static UInt64 ToUInt64(this Byte[] data, Int32 offset = 0, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.ToUInt64(data, offset);
-
-        if (offset > 0) data = data.ReadBytes(offset, 8);
         if (isLittleEndian)
         {
-            var num1 = data[0] | data[1] << 8 | data[2] << 0x10 | data[3] << 0x18;
-            var num2 = data[4] | data[5] << 8 | data[6] << 0x10 | data[7] << 0x18;
-            return (UInt32)num1 | (UInt64)num2 << 0x20;
+            var num1 = data[offset] | data[offset + 1] << 8 | data[offset + 2] << 0x10 | data[offset + 3] << 0x18;
+            var num2 = data[offset + 4] | data[offset + 5] << 8 | data[offset + 6] << 0x10 | data[offset + 7] << 0x18;
+            return (UInt32)num1 | (UInt64)(UInt32)num2 << 0x20;
         }
         else
         {
-            var num3 = data[0] << 0x18 | data[1] << 0x10 | data[2] << 8 | data[3];
-            var num4 = data[4] << 0x18 | data[5] << 0x10 | data[6] << 8 | data[7];
-            return (UInt32)num4 | (UInt64)num3 << 0x20;
+            var num3 = data[offset] << 0x18 | data[offset + 1] << 0x10 | data[offset + 2] << 8 | data[offset + 3];
+            var num4 = data[offset + 4] << 0x18 | data[offset + 5] << 0x10 | data[offset + 6] << 8 | data[offset + 7];
+            return (UInt64)(UInt32)num3 << 0x20 | (UInt32)num4;
         }
+    }
+
+    /// <summary>从字节数据指定位置读取一个单精度浮点数</summary>
+    /// <param name="data"></param>
+    /// <param name="offset">偏移</param>
+    /// <param name="isLittleEndian">是否小端字节序</param>
+    /// <returns></returns>
+    public static Single ToSingle(this Byte[] data, Int32 offset = 0, Boolean isLittleEndian = true)
+    {
+        var buf = new Byte[4];
+        Buffer.BlockCopy(data, offset, buf, 0, 4);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+
+        return BitConverter.ToSingle(buf, 0);
+    }
+
+    /// <summary>从字节数据指定位置读取一个双精度浮点数</summary>
+    /// <param name="data"></param>
+    /// <param name="offset">偏移</param>
+    /// <param name="isLittleEndian">是否小端字节序</param>
+    /// <returns></returns>
+    public static Double ToDouble(this Byte[] data, Int32 offset = 0, Boolean isLittleEndian = true)
+    {
+        var buf = new Byte[8];
+        Buffer.BlockCopy(data, offset, buf, 0, 8);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+
+        return BitConverter.ToDouble(buf, 0);
     }
 
     /// <summary>向字节数组的指定位置写入一个无符号16位整数</summary>
@@ -495,16 +685,46 @@ public static class IOHelper
         return data;
     }
 
+    /// <summary>向字节数组的指定位置写入一个单精度浮点数</summary>
+    /// <param name="data"></param>
+    /// <param name="n">数字</param>
+    /// <param name="offset">偏移</param>
+    /// <param name="isLittleEndian">是否小端字节序</param>
+    /// <returns></returns>
+    public static Byte[] Write(this Byte[] data, Single n, Int32 offset = 0, Boolean isLittleEndian = true)
+    {
+        var buf = BitConverter.GetBytes(n);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+        buf.CopyTo(data, offset);
+
+        return data;
+    }
+
+    /// <summary>向字节数组的指定位置写入一个双精度浮点数</summary>
+    /// <param name="data"></param>
+    /// <param name="n">数字</param>
+    /// <param name="offset">偏移</param>
+    /// <param name="isLittleEndian">是否小端字节序</param>
+    /// <returns></returns>
+    public static Byte[] Write(this Byte[] data, Double n, Int32 offset = 0, Boolean isLittleEndian = true)
+    {
+        var buf = BitConverter.GetBytes(n);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+        buf.CopyTo(data, offset);
+
+        return data;
+    }
+
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
     /// <param name="value"></param>
     /// <param name="isLittleEndian"></param>
     /// <returns></returns>
     public static Byte[] GetBytes(this UInt16 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[2];
-        return buf.Write(value, 0, isLittleEndian);
+        return buf;
     }
 
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
@@ -513,10 +733,10 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetBytes(this Int16 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[2];
-        return buf.Write((UInt16)value, 0, isLittleEndian);
+        return buf;
     }
 
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
@@ -525,10 +745,10 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetBytes(this UInt32 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[4];
-        return buf.Write(value, 0, isLittleEndian);
+        return buf;
     }
 
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
@@ -537,10 +757,10 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetBytes(this Int32 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[4];
-        return buf.Write((UInt32)value, 0, isLittleEndian);
+        return buf;
     }
 
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
@@ -549,10 +769,10 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetBytes(this UInt64 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[8];
-        return buf.Write(value, 0, isLittleEndian);
+        return buf;
     }
 
     /// <summary>整数转为字节数组，注意大小端字节序</summary>
@@ -561,10 +781,34 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetBytes(this Int64 value, Boolean isLittleEndian = true)
     {
-        if (isLittleEndian) return BitConverter.GetBytes(value);
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
 
-        var buf = new Byte[8];
-        return buf.Write((UInt64)value, 0, isLittleEndian);
+        return buf;
+    }
+
+    /// <summary>单精度浮点数转为字节数组，注意大小端字节序</summary>
+    /// <param name="value"></param>
+    /// <param name="isLittleEndian"></param>
+    /// <returns></returns>
+    public static Byte[] GetBytes(this Single value, Boolean isLittleEndian = true)
+    {
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+
+        return buf;
+    }
+
+    /// <summary>双精度浮点数转为字节数组，注意大小端字节序</summary>
+    /// <param name="value"></param>
+    /// <param name="isLittleEndian"></param>
+    /// <returns></returns>
+    public static Byte[] GetBytes(this Double value, Boolean isLittleEndian = true)
+    {
+        var buf = BitConverter.GetBytes(value);
+        if (IsReverseEndian(isLittleEndian)) Array.Reverse(buf);
+
+        return buf;
     }
 
     /// <summary>字节翻转。支持双字节和四字节多批次翻转，主要用于大小端转换</summary>
@@ -608,7 +852,7 @@ public static class IOHelper
         while (true)
         {
             var bt = stream.ReadByte();
-            if (bt < 0) throw new Exception($"数据流超出范围！已读取整数{rs:n0}");
+            if (bt < 0) throw new Exception(L.T("The data stream is out of range! The integer read is {0:n0}", rs));
             b = (Byte)bt;
 
             // 必须转为Int32，否则可能溢出
@@ -616,7 +860,7 @@ public static class IOHelper
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 32) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 32) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return (Int32)rs;
     }
@@ -632,7 +876,7 @@ public static class IOHelper
         while (true)
         {
             var bt = stream.ReadByte();
-            if (bt < 0) throw new Exception("数据流超出范围！");
+            if (bt < 0) throw new Exception(L.T("The data stream is out of range!"));
             b = (Byte)bt;
 
             // 必须转为Int32，否则可能溢出
@@ -640,7 +884,7 @@ public static class IOHelper
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 64) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 64) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return rs;
     }
@@ -665,13 +909,13 @@ public static class IOHelper
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 32) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 32) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return true;
     }
 
     [ThreadStatic]
-    private static Byte[] _encodes;
+    private static Byte[]? _encodes;
     /// <summary>
     /// 以7位压缩格式写入32位整数，小于7位用1个字节，小于14位用2个字节。
     /// 由每次写入的一个字节的第一位标记后面的字节是否还是当前数据，所以每个字节实际可利用存储空间只有后7位。
@@ -681,7 +925,7 @@ public static class IOHelper
     /// <returns>实际写入字节数</returns>
     public static Stream WriteEncodedInt(this Stream stream, Int64 value)
     {
-        if (_encodes == null) _encodes = new Byte[16];
+        _encodes ??= new Byte[16];
 
         var count = 0;
         var num = (UInt64)value;
@@ -702,7 +946,7 @@ public static class IOHelper
     /// <returns></returns>
     public static Byte[] GetEncodedInt(Int64 value)
     {
-        if (_encodes == null) _encodes = new Byte[16];
+        _encodes ??= new Byte[16];
 
         var count = 0;
         var num = (UInt64)value;
@@ -723,7 +967,7 @@ public static class IOHelper
     /// <param name="offset">偏移</param>
     /// <param name="count">数量。超过实际数量时，使用实际数量</param>
     /// <returns></returns>
-    public static String ToHex(this Byte[] data, Int32 offset = 0, Int32 count = -1)
+    public static String ToHex(this Byte[]? data, Int32 offset = 0, Int32 count = -1)
     {
         if (data == null || data.Length <= 0) return "";
 
@@ -752,7 +996,7 @@ public static class IOHelper
     /// <param name="groupSize">分组大小，为0时对每个字节应用分隔符，否则对每个分组使用</param>
     /// <param name="maxLength">最大显示多少个字节。默认-1显示全部</param>
     /// <returns></returns>
-    public static String ToHex(this Byte[] data, String separate, Int32 groupSize = 0, Int32 maxLength = -1)
+    public static String ToHex(this Byte[]? data, String? separate, Int32 groupSize = 0, Int32 maxLength = -1)
     {
         if (data == null || data.Length <= 0) return "";
 
@@ -771,14 +1015,14 @@ public static class IOHelper
         }
 
         var len = count * 2;
-        if (!String.IsNullOrEmpty(separate)) len += (count - 1) * separate.Length;
+        if (!separate.IsNullOrEmpty()) len += (count - 1) * separate.Length;
         if (groupSize > 0)
         {
             // 计算分组个数
             var g = (count - 1) / groupSize;
             len += g * 2;
             // 扣除间隔
-            if (!String.IsNullOrEmpty(separate)) _ = g * separate.Length;
+            if (!separate.IsNullOrEmpty()) _ = g * separate.Length;
         }
         var sb = Pool.StringBuilder.Get();
         for (var i = 0; i < count; i++)
@@ -796,7 +1040,7 @@ public static class IOHelper
             sb.Append(GetHexValue(b & 0x0F));
         }
 
-        return sb.Put(true);
+        return sb.Return(true) ?? String.Empty;
     }
 
     /// <summary>1个字节转为2个16进制字符</summary>
@@ -821,9 +1065,9 @@ public static class IOHelper
     /// <param name="startIndex">起始位置</param>
     /// <param name="length">长度</param>
     /// <returns></returns>
-    public static Byte[] ToHex(this String data, Int32 startIndex = 0, Int32 length = -1)
+    public static Byte[] ToHex(this String? data, Int32 startIndex = 0, Int32 length = -1)
     {
-        if (String.IsNullOrEmpty(data)) return new Byte[0];
+        if (data.IsNullOrEmpty()) return [];
 
         // 过滤特殊字符
         data = data.Trim()
@@ -855,7 +1099,7 @@ public static class IOHelper
     /// <returns></returns>
     public static String ToBase64(this Byte[] data, Int32 offset = 0, Int32 count = -1, Boolean lineBreak = false)
     {
-        if (data == null || data.Length <= 0) return "";
+        if (data == null || data.Length <= 0) return String.Empty;
 
         if (count <= 0)
             count = data.Length - offset;
@@ -881,9 +1125,9 @@ public static class IOHelper
     /// <summary>Base64字符串转为字节数组</summary>
     /// <param name="data"></param>
     /// <returns></returns>
-    public static Byte[] ToBase64(this String data)
+    public static Byte[] ToBase64(this String? data)
     {
-        if (data.IsNullOrWhiteSpace()) return new Byte[0];
+        if (data.IsNullOrWhiteSpace()) return [];
 
         data = data.Trim();
         if (data[^1] != '=')

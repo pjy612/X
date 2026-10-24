@@ -1,50 +1,79 @@
-﻿using System;
-using System.IO;
-using System.Linq;
-using System.Net;
+﻿using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
-using System.Threading;
+using NewLife.Collections;
 using NewLife.Data;
 using NewLife.Log;
-using NewLife.Threading;
 
 namespace NewLife.Net;
 
 /// <summary>增强TCP客户端</summary>
-public class TcpSession : SessionBase, ISocketSession
+/// <remarks>
+/// <para>封装了TCP客户端和服务端会话的功能，支持SSL/TLS安全连接。</para>
+/// <para>功能特性：</para>
+/// <list type="bullet">
+/// <item>支持同步和异步连接</item>
+/// <item>支持SSL/TLS加密传输</item>
+/// <item>支持客户端证书验证</item>
+/// <item>支持TCP KeepAlive</item>
+/// <item>线程安全的数据发送</item>
+/// </list>
+/// <para>文件划分：会话生命周期与连接/SSL 编排（TcpSession.cs）、接收与入站管道（TcpSession.Receive.cs）、发送（TcpSession.Send.cs）、
+/// 出站队列与发送泵（TcpSession.SendQueue.cs）、协议模式消息泵（TcpSession.Pump.cs）、平台差异桥（TcpSession.Platform.cs）。</para>
+/// </remarks>
+public partial class TcpSession : SessionBase, ISocketSession, IStreamSession
 {
     #region 属性
-    /// <summary>实际使用的远程地址。Remote配置域名时，可能有多个IP地址</summary>
-    public IPAddress RemoteAddress { get; private set; }
 
-    /// <summary>收到空数据时抛出异常并断开连接。默认true</summary>
-    public Boolean DisconnectWhenEmptyData { get; set; } = true;
+    /// <summary>实际使用的远程地址</summary>
+    /// <remarks>Remote配置域名时，可能有多个IP地址，此属性记录实际连接的地址</remarks>
+    public IPAddress? RemoteAddress { get; private set; }
 
-    internal ISocketServer _Server;
-    /// <summary>Socket服务器。当前通讯所在的Socket服务器，其实是TcpServer/UdpServer。该属性决定本会话是客户端会话还是服务的会话</summary>
-    ISocketServer ISocketSession.Server => _Server;
+    ///// <summary>收到空数据时抛出异常并断开连接。默认true</summary>
+    //public Boolean DisconnectWhenEmptyData { get; set; } = true;
 
-    ///// <summary>自动重连次数，默认3。发生异常断开连接时，自动重连服务端。</summary>
-    //public Int32 AutoReconnect { get; set; } = 3;
+    internal ISocketServer? _Server;
 
-    /// <summary>不延迟直接发送。Tcp为了合并小包而设计，客户端默认false，服务端默认true</summary>
+    /// <summary>Socket服务器</summary>
+    /// <remarks>当前通讯所在的Socket服务器，其实是TcpServer/UdpServer。该属性决定本会话是客户端会话还是服务的会话</remarks>
+    ISocketServer ISocketSession.Server => _Server!;
+
+    /// <summary>不延迟直接发送</summary>
+    /// <remarks>Tcp为了合并小包而设计，客户端默认false，服务端默认true</remarks>
     public Boolean NoDelay { get; set; }
 
-    /// <summary>SSL协议。默认None，服务端Default，客户端不启用</summary>
+    /// <summary>KeepAlive间隔（秒）</summary>
+    /// <remarks>默认0秒不启用。启用后可及时检测连接断开</remarks>
+    public Int32 KeepAliveInterval { get; set; }
+
+    /// <summary>SSL协议版本</summary>
+    /// <remarks>默认None不启用SSL，服务端使用Default，客户端不启用</remarks>
     public SslProtocols SslProtocol { get; set; } = SslProtocols.None;
 
-    /// <summary>X509证书。用于SSL连接时验证证书指纹，可以直接加载pem证书文件，未指定时不验证证书</summary>
-    /// <remarks>var cert = new X509Certificate2("file", "pass");</remarks>
-    public X509Certificate Certificate { get; set; }
+    /// <summary>X509证书</summary>
+    /// <remarks>
+    /// <para>用于SSL连接时验证证书指纹，可以直接加载pem证书文件，未指定时不验证证书。</para>
+    /// <para>可以使用pfx证书文件，也可以使用pem证书文件。</para>
+    /// <para>服务端必须指定证书，客户端可以不指定，除非服务端请求客户端证书。</para>
+    /// </remarks>
+    /// <example>
+    /// var cert = new X509Certificate2("file", "pass");
+    /// </example>
+    public X509Certificate? Certificate { get; set; }
 
-    private SslStream _Stream;
-    #endregion
+    private SslStream? _Stream;
+
+    /// <summary>系统自动分配的本地端口。0表示无</summary>
+    /// <remarks>用于区分“自动分配”与“用户指定”：前者只回填展示，重连时重新分配，避免复用上次连接的残留端口</remarks>
+    private Int32 _autoLocalPort;
+
+    #endregion 属性
 
     #region 构造
-    /// <summary>实例化增强TCP</summary>
+
+    /// <summary>实例化增强TCP客户端</summary>
     public TcpSession()
     {
         Name = GetType().Name;
@@ -52,145 +81,259 @@ public class TcpSession : SessionBase, ISocketSession
         Remote.Type = NetType.Tcp;
     }
 
-    /// <summary>使用监听口初始化</summary>
-    /// <param name="listenPort"></param>
+    /// <summary>使用监听端口初始化</summary>
+    /// <param name="listenPort">监听端口</param>
     public TcpSession(Int32 listenPort) : this() => Port = listenPort;
 
     /// <summary>用TCP客户端初始化</summary>
-    /// <param name="client"></param>
+    /// <param name="client">已连接的Socket</param>
     public TcpSession(Socket client) : this()
     {
         if (client == null) return;
 
         Client = client;
         var socket = client;
-        if (socket.LocalEndPoint != null) Local.EndPoint = (IPEndPoint)socket.LocalEndPoint;
-        if (socket.RemoteEndPoint != null) Remote.EndPoint = (IPEndPoint)socket.RemoteEndPoint;
+        if (socket.LocalEndPoint is IPEndPoint localEp) Local.EndPoint = localEp;
+        if (socket.RemoteEndPoint is IPEndPoint remoteEp) Remote.EndPoint = remoteEp;
+
+        TryFillUnixEndPoints(socket, Local, Remote);
     }
 
     internal TcpSession(ISocketServer server, Socket client)
         : this(client)
     {
+        // 服务端会话表示“连接已被接受”，构造时即视为活动：之后服务器的 Start() 只负责启动接收环，
+        // 不再走打开流程（Open 因此幂等成功）
         Active = true;
         _Server = server;
         Name = server.Name;
     }
-    #endregion
+
+    #endregion 构造
 
     #region 方法
+
     internal void Start()
     {
-        // 管道
-        Pipeline?.Open(base.CreateContext(this));
-
-        // 设置读写超时
+        // 设置读写超时。Unix域套接字不支持TCP选项
         var sock = Client;
         var timeout = Timeout;
-        if (timeout > 0)
+        if (timeout > 0 && sock != null && !Local.IsUnix)
         {
             sock.SendTimeout = timeout;
             sock.ReceiveTimeout = timeout;
         }
 
-        // 服务端SSL
+        // 服务端SSL：异步认证。同步握手会在受理线程上阻塞，慢/恶意客户端可长时间占住受理槽位
+        // （MaxAsync 个慢握手即让新连接受理停摆）
         var cert = Certificate;
         if (sock != null && cert != null)
         {
+            // 先占写锁再发起握手：握手期间到达的业务发送会在锁上等待，不会把明文写进TLS流；
+            // 锁由握手任务在结束后释放，故此处不能省略
+            _writeLock.Wait();
+            _ = StartSslAsync(sock, cert, timeout);
+
+            return;
+        }
+
+        StartServerReceive();
+    }
+
+    /// <summary>服务端SSL认证（异步），完成后启动接收环</summary>
+    /// <remarks>
+    /// <para>握手写持有写锁（由 <see cref="Start"/> 抢占）：握手期间到达的业务发送会等待锁，不会把明文写进TLS流。</para>
+    /// <para>握手不占受理槽位：慢/恶意客户端挂着不完成握手时，新连接仍可被受理（旧实现在受理线程上同步握手）。</para>
+    /// <para>握手失败（超时、证书错误、明文请求打到TLS端口）即释放会话，避免其滞留会话集合直到超时。</para>
+    /// </remarks>
+    /// <param name="sock">已接受的套接字</param>
+    /// <param name="cert">服务端证书</param>
+    /// <param name="timeout">认证超时（毫秒），小于等于零表示不启用</param>
+    private async Task StartSslAsync(Socket sock, X509Certificate cert, Int32 timeout)
+    {
+        Exception? error = null;
+        SslStream? sslStream = null;
+        try
+        {
             var ns = new NetworkStream(sock);
-            var sslStream = new SslStream(ns, false);
+            sslStream = new SslStream(ns, false);
 
             var sp = SslProtocol;
+            if (sp == SslProtocols.None) sp = SslProtocols.Tls12;
 
-            WriteLog("服务端SSL认证 {0} {1}", sp, cert.Issuer);
+            WriteLog("Server SSL authentication, SslProtocol={0}, Issuer: {1}", sp, cert.Issuer);
 
-            //var cert = new X509Certificate2("file", "pass");
-            sslStream.AuthenticateAsServer(cert, false, sp, false);
+            await AuthenticateAsServerAsync(sslStream, sock, cert, sp, timeout).ConfigureAwait(false);
 
             _Stream = sslStream;
         }
+        catch (Exception ex)
+        {
+            error = ex;
+        }
+        finally
+        {
+            // 握手结束即释放写锁；其后的失败处理（含会话释放）可能触发用户回调，必须在锁外执行
+            _writeLock.Release();
+        }
 
-        ReceiveAsync();
+        if (error != null)
+        {
+            WriteLog("Server SSL authentication failed; releasing session {0}", error.Message);
+            if (!Disposed && !error.IsDisposed()) OnError("SslAuthenticate", error);
+
+            sslStream?.TryDispose();
+            Dispose();
+
+            return;
+        }
+
+        try
+        {
+            StartServerReceive();
+        }
+        catch (Exception ex)
+        {
+            // 启动接收环失败。同步路径由受理流程捕获后释放会话，异步路径必须自行兜底，
+            // 否则会话留在集合里既不收数据也不断开
+            WriteLog("Failed to start the server session; releasing session {0}", ex.Message);
+            if (!Disposed && !ex.IsDisposed()) OnError("Start", ex);
+
+            Dispose();
+        }
+    }
+
+    /// <summary>启动服务端会话的接收环与消息泵（服务端会话由服务器统一接管接收）</summary>
+    private void StartServerReceive()
+    {
+        // 服务端会话由服务器统一接管，必须启动接收环（事件模式），不支持拉取模式。
+        // 这里直接置位而不是读取配置：子类若在 CreateSession 里设 AutoReceive=false，
+        // 旧的"条件启动"会让属性与实际接收模式不一致（事件照收、拉取却被拒），必须在启动时收敛为 true
+        AutoReceive = true;
+
+        // 协议模式：数据经数据管道定界，启动消息泵（先于接收环，首个数据到达前就绪）
+        StartReceiveFlow();
+
+        StartReceive();
     }
 
     /// <summary>打开</summary>
-    protected override Boolean OnOpen()
+    /// <param name="cancellationToken">取消通知</param>
+    protected override async Task<Boolean> OnOpenAsync(CancellationToken cancellationToken)
     {
         // 服务端会话没有打开
         if (_Server != null) return false;
 
+        var span = DefaultSpan.Current;
         var timeout = Timeout;
         var uri = Remote;
+        var isUnix = uri != null && uri.IsUnix;
         var sock = Client;
         if (sock == null || !sock.IsBound)
         {
-            // 根据目标地址适配本地IPv4/IPv6
-            if (Local.Address.IsAny() && uri != null && !uri.Address.IsAny())
-            {
-                Local.Address = Local.Address.GetRightAny(uri.Address.AddressFamily);
-            }
+            span?.AppendTag($"Local={Local}");
 
-            sock = Client = NetHelper.CreateTcp(Local.Address.IsIPv4());
-            //sock.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
-            if (NoDelay) sock.NoDelay = true;
-            if (timeout > 0)
+            if (isUnix)
             {
-                sock.SendTimeout = timeout;
-                sock.ReceiveTimeout = timeout;
+                // Unix域套接字以文件路径为地址，客户端无需绑定本地地址
+                sock = Client = NetHelper.CreateUnix();
+                if (timeout > 0)
+                {
+                    sock.SendTimeout = timeout;
+                    sock.ReceiveTimeout = timeout;
+                }
             }
-            sock.Bind(Local.EndPoint);
+            else
+            {
+                // 根据目标地址适配本地IPv4/IPv6
+                if (Local.Address.IsAny() && uri != null && !uri.Address.IsAny())
+                {
+                    Local.Address = Local.Address.GetRightAny(uri.Address.AddressFamily)!;
+                }
+
+                sock = Client = NetHelper.CreateTcp(Local.Address!.IsIPv4());
+                //sock.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+                if (NoDelay) sock.NoDelay = true;
+
+                // 内核接收窗口决定大报文吞吐上限，默认不修改（0）
+                var rcvBuf = SocketSetting.Current.ReceiveBufferSize;
+                if (rcvBuf > 0) sock.ReceiveBufferSize = rcvBuf;
+                if (timeout > 0)
+                {
+                    sock.SendTimeout = timeout;
+                    sock.ReceiveTimeout = timeout;
+                }
+
+                // 系统自动分配的本地端口只用于展示，重连时不得复用：上次连接的套接字残留状态（TIME_WAIT/关闭中）
+                // 会让相同五元组的新建连随机失败（WSAEADDRINUSE）。仅用户显式指定的端口才复用
+                var autoPort = Local.Port == 0 || Local.Port == _autoLocalPort;
+                sock.Bind(autoPort ? new IPEndPoint(Local.Address, 0) : Local.EndPoint);
+
+                // 回填实际本地端口，便于日志与上层展示；并记录来源，供下一次重连区分自动分配与用户指定
+                if (sock.LocalEndPoint is IPEndPoint ep)
+                {
+                    Local.EndPoint.Port = ep.Port;
+                    _autoLocalPort = autoPort ? ep.Port : 0;
+                }
+                span?.AppendTag($"LocalEndPoint={sock.LocalEndPoint}");
+            }
 
             WriteLog("Open {0}", this);
         }
 
         // 打开端口前如果已设定远程地址，则自动连接
-        if (uri == null || uri.EndPoint.IsAny()) return false;
+        if (uri == null) return false;
+        if (isUnix)
+        {
+            if (uri.Path.IsNullOrEmpty()) return false;
+        }
+        else if (uri.EndPoint.IsAny()) return false;
 
         try
         {
-            var ep = uri.EndPoint;
-            if (!Local.Address.IsIPv4() && ep.Address.IsIPv4())
+            // Unix域套接字直接以文件路径连接
+            if (isUnix)
             {
-                var address = uri.GetAddresses().FirstOrDefault(_ => !_.IsIPv4());
-                if (address != null) ep = new IPEndPoint(address, ep.Port);
-            }
-            else if (Local.Address.IsIPv4() && !ep.Address.IsIPv4())
-            {
-                var address = uri.GetAddresses().FirstOrDefault(_ => _.IsIPv4());
-                if (address != null) ep = new IPEndPoint(address, ep.Port);
-            }
+                var ep = CreateUnixEndPoint(uri.Path!);
+                span?.AppendTag($"RemoteEndPoint={ep}");
 
-            RemoteAddress = ep.Address;
-            if (timeout <= 0)
-                sock.Connect(ep);
+                await ConnectAsync(sock, ep, timeout, cancellationToken).ConfigureAwait(false);
+            }
             else
             {
-                // 采用异步来解决连接超时设置问题
-                var ar = sock.BeginConnect(ep, null, null);
-                if (!ar.AsyncWaitHandle.WaitOne(timeout, true))
-                {
-                    sock.Close();
-                    throw new TimeoutException($"连接[{uri}][{timeout}ms]超时！");
-                }
+                var addrs = uri.GetAddresses();
+                addrs = addrs.Where(ip => ip.AddressFamily == sock.AddressFamily).ToArray();
+                span?.AppendTag($"addrs={addrs.Join()} port={uri.Port}");
 
-                sock.EndConnect(ar);
+                await ConnectAsync(sock, addrs, uri.Port, timeout, cancellationToken, uri).ConfigureAwait(false);
             }
+
+            // 作为客户端，启用KeepAlive，及时释放无效连接。Unix域套接字不支持
+            if (KeepAliveInterval > 0 && !isUnix) sock.SetTcpKeepAlive(true, KeepAliveInterval, KeepAliveInterval);
+
+            RemoteAddress = (sock.RemoteEndPoint as IPEndPoint)?.Address;
+            span?.AppendTag($"RemoteEndPoint={sock.RemoteEndPoint}");
 
             // 客户端SSL
             var sp = SslProtocol;
             if (sp != SslProtocols.None)
             {
-                WriteLog("客户端SSL认证 {0} {1}", sp, uri.Host);
+                var host = uri.Host ?? uri.Address + "";
+                WriteLog("Client SSL authentication, SslProtocol={0}, Host={1}", sp, host);
 
-                var ns = new NetworkStream(sock);
-                var sslStream = new SslStream(ns, false, OnCertificateValidationCallback);
-                sslStream.AuthenticateAsClient(uri.Host, new X509CertificateCollection(), sp, false);
+                // 服务端请求客户端证书时，需要传入证书
+                var certs = new X509CertificateCollection();
+                var cert = Certificate;
+                if (cert != null) certs.Add(cert);
 
-                _Stream = sslStream;
+                _Stream = await AuthenticateAsClientAsync(sock, host, certs, sp, timeout, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
         {
-            // 连接失败时，任何错误都放弃当前Socket
+            // 连接失败时，任何错误都放弃当前Socket。TLS 认证失败时 socket 已建立，不显式关闭会把句柄挂到 GC
+            sock.Close();
+
             Client = null;
             if (!Disposed && !ex.IsDisposed()) OnError("Connect", ex);
 
@@ -202,7 +345,7 @@ public class TcpSession : SessionBase, ISocketSession
         return true;
     }
 
-    private Boolean OnCertificateValidationCallback(Object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
+    private Boolean OnCertificateValidationCallback(Object? sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors sslPolicyErrors)
     {
         //WriteLog("Valid {0} {1}", certificate.Issuer, sslPolicyErrors);
         //if (chain?.ChainStatus != null)
@@ -215,6 +358,7 @@ public class TcpSession : SessionBase, ISocketSession
 
         // 如果没有证书，全部通过
         if (Certificate is not X509Certificate2 cert) return true;
+        if (chain == null) return false;
 
         return chain.ChainElements
                 .Cast<X509ChainElement>()
@@ -223,7 +367,9 @@ public class TcpSession : SessionBase, ISocketSession
 
     /// <summary>关闭</summary>
     /// <param name="reason">关闭原因。便于日志分析</param>
-    protected override Boolean OnClose(String reason)
+    /// <param name="cancellationToken">取消通知</param>
+    /// <returns>是否成功关闭</returns>
+    protected override Task<Boolean> OnCloseAsync(String reason, CancellationToken cancellationToken)
     {
         var client = Client;
         if (client != null)
@@ -231,11 +377,26 @@ public class TcpSession : SessionBase, ISocketSession
             WriteLog("Close {0} {1}", reason, this);
 
             // 提前关闭这个标识，否则Close时可能触发自动重连机制
+            // 此处只改“传输可用性”：服务端会话随后会被 Dispose（连带移出会话集合），
+            // 客户端会话保留未释放（会话对象一次性，由调用方保管），因此“Active 为假、Disposed 尚未置位”是关闭流程的正常瞬态
             Active = false;
             try
             {
+                // 先关闭SSL流
+                var stream = _Stream;
+                if (stream != null)
+                {
+                    _Stream = null;
+                    try
+                    {
+                        stream.Close();
+                        stream.Dispose();
+                    }
+                    catch { }
+                }
+
                 // 温和一点关闭连接
-                Client.Shutdown();
+                client.Shutdown();
                 client.Close();
 
                 // 如果是服务端，这个时候就是销毁
@@ -247,233 +408,107 @@ public class TcpSession : SessionBase, ISocketSession
                 if (!ex.IsDisposed()) OnError("Close", ex);
                 //if (ThrowException) throw;
 
-                return false;
+                // 关闭动作（Shutdown/Close）抛异常时底层连接状态已不可信，服务端会话必须在此释放：
+                // 否则它会以 Active=false 留在会话集合里，一直等到会话超时清理才摘除（这段时间集合与计数都把它算作在线）。
+                // 此处 Dispose 是安全的：Active 已在上方置 false，Dispose 内部再走的 Close 会幂等短路；
+                // 客户端会话不在此释放，由调用方保管（会话对象一次性，关闭后不可重新打开）。
+                if (_Server != null) Dispose();
+
+                return Task.FromResult(false);
             }
             Client = null;
         }
 
-        return true;
+        return Task.FromResult(true);
     }
-    #endregion
 
-    #region 发送
-    private Int32 _bsize;
-    private SpinLock _spinLock = new();
+    #endregion 方法
 
-    /// <summary>发送数据</summary>
-    /// <remarks>
-    /// 目标地址由<seealso cref="SessionBase.Remote"/>决定
-    /// </remarks>
-    /// <param name="pk">数据包</param>
+    #region 关闭收尾
+    /// <summary>关闭。重写以收尾流式收发：出站队列残余直接丢弃并归还缓冲（不排空），入站管道终止（挂起读立即完成）</summary>
+    /// <param name="reason">关闭原因。便于日志分析</param>
+    /// <param name="cancellationToken">取消通知</param>
     /// <returns>是否成功</returns>
-    protected override Int32 OnSend(Packet pk)
+    public override async Task<Boolean> CloseAsync(String reason, CancellationToken cancellationToken = default)
     {
-        var count = pk.Total;
-
-        if (Log != null && Log.Enable && LogSend) WriteLog("Send [{0}]: {1}", count, pk.ToHex(LogDataLength));
-
-        using var span = Tracer?.NewSpan($"net:{Name}:Send", pk.Total + "");
-        var rs = count;
-        var sock = Client;
-        var gotLock = false;
         try
         {
-            // 修改发送缓冲区，读取SendBufferSize耗时很大
-            if (_bsize == 0) _bsize = sock.SendBufferSize;
-            if (_bsize < count) sock.SendBufferSize = _bsize = count;
-
-            // 加锁发送
-            _spinLock.Enter(ref gotLock);
-
-            if (_Stream == null)
-            {
-                if (count == 0)
-                    rs = sock.Send(new Byte[0]);
-                else if (pk.Next == null)
-                    rs = sock.Send(pk.Data, pk.Offset, count, SocketFlags.None);
-                else
-                    rs = sock.Send(pk.ToSegments());
-            }
-            else
-            {
-                if (count == 0)
-                    _Stream.Write(new Byte[0]);
-                else if (pk.Next == null)
-                    _Stream.Write(pk.Data, pk.Offset, count);
-                else
-                    _Stream.Write(pk.ToArray());
-            }
-
-            //// 检查返回值
-            //if (rs != count) throw new NetException($"发送[{count:n0}]而成功[{rs:n0}]");
-        }
-        catch (Exception ex)
-        {
-            span?.SetError(ex, pk);
-
-            if (!ex.IsDisposed())
-            {
-                OnError("Send", ex);
-
-                // 发送异常可能是连接出了问题，需要关闭
-                Close("发送出错");
-
-                //// 异步重连
-                //ThreadPoolX.QueueUserWorkItem(Reconnect);
-
-                //if (ThrowException) throw;
-            }
-
-            return -1;
+            return await base.CloseAsync(reason, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            if (gotLock) _spinLock.Exit();
+            // 仅在关闭真正发生（会话已不活动）时执行流式收尾：取消在入口被拦截（会话仍活动）时
+            // 不得拆掉管道与队列——否则会话外显“还开着”却收不到数据。
+            // 未打开的关闭（Active 亦为假）照常收尾，幂等复位上一轮资源
+            if (!Active) CleanupStreamFlows();
         }
-
-        LastTime = DateTime.Now;
-
-        return rs;
     }
-    #endregion
 
-    #region 接收
-    internal override Boolean OnReceiveAsync(SocketAsyncEventArgs se)
+    /// <summary>流式收尾：停发送泵并释放出站队列（残余丢弃）、终止入站管道、释放暂存接收槽</summary>
+    private void CleanupStreamFlows()
     {
-        var sock = Client;
-        if (sock == null || !Active || Disposed) throw new ObjectDisposedException(GetType().Name);
-
-        var ss = _Stream;
-        if (ss != null)
+        // 出站队列：先停泵（结束写侧唤醒挂起读，并等泵退出后不再触碰队列缓冲），
+        // 入队方的水位等待随之结束，最后释放队列归还残余池缓冲。
+        // 不排空——停机场景对端往往已不可达，队列残余本就送不出去，逐会话限时排空会让总耗时随会话数线性放大。
+        //
+        // 取走队列与 getter 的双检锁互斥，避免关闭期间又新建出一个无人释放的队列与发送泵
+        Pipe? queue;
+        lock (_sendQueueLock)
         {
-            ss.BeginRead(se.Buffer, se.Offset, se.Count, OnEndRead, se);
-
-            return true;
+            queue = _sendQueue;
+            _sendQueue = null;
         }
 
-        return sock.ReceiveAsync(se);
-    }
-
-    /// <summary>异步读取数据流，仅用于SSL</summary>
-    /// <param name="ar"></param>
-    private void OnEndRead(IAsyncResult ar)
-    {
-        var se = ar.AsyncState as SocketAsyncEventArgs;
-        Int32 bytes;
-        try
+        if (queue != null)
         {
-            bytes = _Stream.EndRead(ar);
-        }
-        catch (Exception ex)
-        {
-            if (ex is IOException ||
-            ex is SocketException sex && sex.SocketErrorCode == SocketError.ConnectionReset)
-            {
-            }
-            else
-            {
-                XTrace.WriteException(ex);
-            }
+            queue.Resumed -= OnSendQueueResumed;
 
-            return;
+            StopSendPump(queue);
+
+            // 唤醒仍在等水位的入队方：完成写侧不会触发 Resumed，不唤醒它们会永久挂起
+            WakeQueueWaiters();
+
+            queue.Dispose();
         }
 
-        ProcessEvent(se, bytes, true);
+        // 入站流：释放管道（等价于完成写侧唤醒挂起读 + 结束读侧归还残余池缓冲）。
+        // 只完成写侧会让读侧链上尚未消费的池缓冲一直挂到管道随对象不可达，由终结器兜底归还；
+        // 服务端会话还可能存活到 SessionTimeout，等于长期占用内存池。
+        _pipe?.Dispose();
+
+        // 复位入站管道，交由懒创建在再次访问时重建。客户端会话关闭后未释放（会话对象一次性，由调用方保管），
+        // 若继续持有已完成管道，再次访问会拿到已结束的读取器，协议模式接收泵在其上读取即抛异常
+        _pipe = null;
+
+        ReleaseParkedReceive();
     }
-
-    //private Int32 _empty;
-    /// <summary>预处理</summary>
-    /// <param name="pk">数据包</param>
-    /// <param name="remote">远程地址</param>
-    /// <returns>将要处理该数据包的会话</returns>
-    internal protected override ISocketSession OnPreReceive(Packet pk, IPEndPoint remote)
-    {
-        if (pk.Count == 0)
-        {
-            using var span = Tracer?.NewSpan($"net:{Name}:EmptyData");
-
-            // 连续多次空数据，则断开
-            if (DisconnectWhenEmptyData /*|| _empty++ > 3*/)
-            {
-                Close("收到空数据");
-                Dispose();
-
-                return null;
-            }
-        }
-        //else
-        //    _empty = 0;
-
-        return this;
-    }
-
-    /// <summary>处理收到的数据</summary>
-    /// <param name="e">接收事件参数</param>
-    protected override Boolean OnReceive(ReceivedEventArgs e)
-    {
-        //var pk = e.Packet;
-        //if ((pk == null || pk.Count == 0) && e.Message == null && !MatchEmpty) return true;
-
-        // 分析处理
-        RaiseReceive(this, e);
-
-        return true;
-    }
-    #endregion
-
-    #region 自动重连
-    ///// <summary>重连次数</summary>
-    //private Int32 _Reconnect;
-    //void Reconnect()
-    //{
-    //    if (Disposed) return;
-    //    // 如果重连次数达到最大重连次数，则退出
-    //    if (Interlocked.Increment(ref _Reconnect) > AutoReconnect) return;
-
-    //    WriteLog("Reconnect {0}", this);
-
-    //    using var span = Tracer?.NewSpan($"net:{Name}:Reconnect", _Reconnect + "");
-    //    try
-    //    {
-    //        Open();
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        span?.SetError(ex, null);
-    //    }
-    //}
     #endregion
 
     #region 辅助
-    private String _LogPrefix;
     /// <summary>日志前缀</summary>
-    public override String LogPrefix
+    public override String? LogPrefix
     {
         get
         {
-            if (_LogPrefix == null)
-            {
-                var name = _Server == null ? "" : _Server.Name;
-                _LogPrefix = $"{name}[{ID}].";
-            }
-            return _LogPrefix;
+            var pf = base.LogPrefix;
+            if (pf == null && _Server != null)
+                pf = base.LogPrefix = $"{_Server.Name}[{ID}].";
+
+            return pf;
         }
-        set { _LogPrefix = value; }
+        set { base.LogPrefix = value; }
     }
 
     /// <summary>已重载。</summary>
     /// <returns></returns>
     public override String ToString()
     {
-        if (Remote != null && !Remote.EndPoint.IsAny())
-        {
-            if (_Server == null)
-                return $"{Local}=>{Remote.EndPoint}";
-            else
-                return $"{Local}<={Remote.EndPoint}";
-        }
-        else
-            return Local.ToString();
+        var local = Local;
+        var remote = Remote.EndPoint;
+        if (remote == null || remote.IsAny())
+            return local.ToString();
+
+        return _Server == null ? $"{local}=>{remote}" : $"{local}<={remote}";
     }
     #endregion
 }

@@ -1,0 +1,132 @@
+# 数据包编码器PacketCodec
+
+> ⚠️ **旧栈文档（v12 已退役）**：`PacketCodec`/`PacketFramer` 已整删，拆帧职责由 `MessagePump` 承担（见《消息协议栈》）。文中“缓存链 + 共享切片切帧”机制在新帧泵中延续；`IPacket` 数据包本身未变（见《数据包IPacket》）。
+
+## 概述
+
+`PacketCodec` 处理 TCP 粘包/拆包：把分多次到达的字节流，切成一帧帧完整数据。
+
+**模型：单一缓存链 + 共享切片切帧。** 每次 `Parse` 三步走：
+
+1. **追加**：本轮数据以共享切片（拥有句柄输入）或视图（视图输入）追加到缓存链尾（零拷贝）；
+2. **切帧**：调用 `GetFrameLength` 委托（只读序列窗口，可跨段）从缓存链头连续切出完整帧（帧头跨节点由委托跨段拼读）；
+3. **保自有**：借阅视图的残片不能跨轮，转为自有拷贝后保留。
+
+**命名空间**：`NewLife.Messaging`
+**文档地址**：https://newlifex.com/core/packet_codec
+
+> 全局缓冲所有权与消息层归属处理见《网络缓冲所有权架构》。
+> WebSocket 链路（服务端 `Http/WebSocket` 与会话 `Net/Handlers/WebSocketCodec`）的取帧已切换到数据管道 + 帧泵，见《数据管道Pipe》；本编码器保留为存量协议路径。2026-09-16 评估结论：保持双引擎定位、不做单一引擎外观化；帧长接口统一为序列版 `GetFrameLength`（旧 IPacket/span 双委托已删除），见《网络库架构》。
+
+## 所有权规则
+
+| 对象 | 所有权 |
+|------|--------|
+| 入参 `pk` | 归调用方；`Parse` 从不释放 |
+| 缓存残片 | 缓存持有自己的引用：拥有输入→共享切片；视图输入→借用（跨轮残片自动转拷贝） |
+| 返回帧 | 共享切片/链（拥有输入：可自由持有，用后 `Dispose`）；视图输入时为视图，仅本轮同步有效 |
+| `Clear` / `Dispose` | 释放整条缓存链持有的引用 |
+
+三个零拷贝要点：
+
+- **帧恰好覆盖整条缓存** → 缓存节点直接作为帧转移（不再二次分配）；
+- **跨节点帧** → `Slice` 自动组链，每段各持一份引用、各自释放；
+- **窗口前移** → 帧与剩余窗口各切一份共享切片（原句柄归还），不搬移数据。
+
+## 五个核心场景
+
+| # | 本轮形态 | 行为 | 返回帧 | 分配 / 拷贝（经验） |
+|---|---------|------|--------|--------------------|
+| S1 | 无缓存，恰一完整帧 | 缓存节点直接作为帧转移 | 拥有切片（视图输入＝视图） | 0 分配（整帧转移）/ 0 拷贝 |
+| S2 | 无缓存，N≥2 个完整帧 | 逐帧共享切片 | 每帧一份切片 | 帧切片 + 剩余窗口切片（末帧句柄转移）/ 0 拷贝 |
+| S3 | 无缓存，完整帧 + 尾残片 | 帧切片；残片留在缓存跨轮 | 帧切片 | 帧切片 + 剩余窗口切片 / 0 拷贝 |
+| S4 | 有缓存，并入后仍不足一帧 | 残片继续累积（委托链扫描/头部定界） | 无 | 追加拼链零拷贝；帧头跨节点由委托拼读（零拷贝） |
+| S5 | 有缓存，凑齐一帧（+） | 跨节点共享切片组链 | 切片链 | 跨节点组链切片 + 剩余窗口切片 / 0 拷贝 |
+
+**典型流中的场景分布（经验估算，假设读窗口 4~8KB）**：
+
+| 流型 | S1 | S2 | S3 | S4 | S5 |
+|------|----|----|----|----|----|
+| RPC 请求响应（帧 ≈ 读） | 70~85% | ~0 | 15~30% | <5% | <5% |
+| 小帧批量流水（帧 ~100B 级） | ~0 | 多帧轮主导 | 每轮 | ≈0 | 每轮（补残片） |
+| 大帧跨轮（帧 ≫ 读窗口） | 首轮 | ~0 | ~0 | ≥95% | 完成轮 |
+
+> 场景可组合出现（如“补残片 + 多帧 + 新残片”同轮）；本表是后续方案讨论与性能评估的统一视角。
+
+**边界（均已自动处理）**：帧头跨节点 → 链感知委托跨段拼读（`GetPrefix` 直取前缀 / 跨段拼入栈缓冲，零拷贝）；分隔符跨节点 → 链内扫描直接命中（含交界窗口），零拷贝；超大帧跨多轮 → 段链零拷贝累积；空数据 / 超时 / 超上限 → 早退或丢弃。
+
+## 快速开始
+
+```csharp
+// 每个连接独立实例；pk 为本轮收到的数据
+var parser = new DefaultMessage();
+var codec = new PacketCodec
+{
+    GetFrameLength = buffer => parser.TryParse(buffer, out _),
+    MaxCache = 4 * 1024 * 1024,
+};
+
+foreach (var frame in codec.Parse(pk))
+{
+    // 拥有帧（切片/链）可自由持有，用后 Dispose；视图帧仅本轮有效
+    ProcessFrame(frame);
+}
+```
+
+## 主要成员
+
+| 成员 | 说明 |
+|------|------|
+| `Parse(IPacket pk)` | 唯一入口：追加 → 切帧 → 保自有，返回完整帧列表 |
+| `Clear()` | 清空缓存并释放引用，实例可继续使用 |
+| `Dispose()` | 释放缓存链引用；连接关闭时调用 |
+| `GetFrameLength` | 帧长解析委托（只读序列窗口，见下节） |
+| `Last` / `Expire` / `MaxCache` | 时间戳、缓存过期与上限（达到 MaxCache 含等于即整体丢弃；Expire ≤0 表示残片每轮丢弃） |
+| `Tracer` | APM 追踪 |
+
+## GetFrameLength 委托
+
+```csharp
+public Func<ReadOnlySequence<Byte>, Int32>? GetFrameLength { get; set; }
+```
+
+**契约定版**：入参为**缓存窗口（帧首起的只读序列，可跨段）**——帧头跨段由序列读取自然支持，不再需要链感知拼读；返回**完整帧长（可能大于现有数据）**；返回 0/负值表示无法定界，等下一轮。注意窗口是缓存总量而非帧长。
+
+### 常见协议的 GetFrameLength 实现
+
+```csharp
+// NewLife 默认消息格式（消息自解析）
+var parser = new DefaultMessage();
+GetFrameLength = buffer => parser.TryParse(buffer, out _);
+
+// 2字节小端长度字段（Offset+Size，LengthFieldCodec 风格）
+GetFrameLength = buffer => MessageCodec<DefaultMessage>.GetLength(buffer, 0, 2);
+
+// WebSocket 帧（含扩展长度/掩码头）
+var ws = new WebSocketMessage();
+GetFrameLength = buffer => ws.TryParse(buffer, out _);
+
+// 分隔符扫描（跨段扫描，零拷贝；完整实现见 SplitDataCodec.GetLineLength）
+GetFrameLength = GetLineLength;
+
+// 固定包长（如 Modbus RTU）
+GetFrameLength = buffer => 8;
+```
+
+## 与接收层的协同
+
+- 接收层（`SessionBase`）每轮把一个**拥有句柄**交给管道；
+- codec 需要保留残片时，切一份共享引用放进缓存 → 缓冲引用计数大于 1；
+- 轮末按引用计数裁决：**无他人持有（rc==1）→ 缓冲继续复用，零 Rent/Return；有持有 → 换新缓冲**；被带出的缓冲由最后的持有者归还；
+- 帧交给下游后：同步消费可直接使用；跨轮/跨 await 持有时用后 `Dispose`（事件内带出可用 `Slice` 切出共享句柄）。
+
+## 注意事项
+
+- **每连接一个实例**：`PacketCodec` 有内部状态（缓存链），禁止跨连接共享。
+- **`GetLength` 跨段拼读**：帧头可跨节点，用 `GetPrefix`/`ReadBytes` 拼读定界；分隔符类协议链内扫描；不要依赖 `pk.Total`（那是缓存总量）。
+- **`Expire` / `MaxCache`**：防止网络异常导致残包长期占用内存。缓存量达到 `MaxCache`（含等于）或距上次加入数据超过 `Expire` 毫秒时整体丢弃，并经 `Tracer` 错误 Span 上报；损坏帧（定界返回 0/负值）等待后续数据，连接不中断。
+- **异常安全**：帧长委托或残片拷贝抛异常时，已切出的帧先归还引用再放行异常；借阅输入的缓存整链清空（视图残片不跨轮）。
+- **关闭连接时 `Dispose`**：归还缓存链引用；内置编码器（Standard/LengthField/SplitData/WebSocket）已在 `Close` 中自动归还本会话实例。
+- **会话隔离**：处理器实例被多会话共享，`PacketCodec` 禁止放处理器字段；应存 `context.Owner` 的 `IExtend`（键 `ss["Codec"]`，`WebSocketCodec` 用独立键以允许级联）。
+- **回归测试**：`XUnitTest.Core/Net/PacketCodecSplitTests.cs`、`PacketCodecBigFrameTests.cs`。
+

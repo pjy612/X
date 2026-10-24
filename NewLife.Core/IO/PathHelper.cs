@@ -1,11 +1,26 @@
 ﻿using System.IO.Compression;
 using NewLife;
+using NewLife.Compression;
+using NewLife.Security;
+using System.Security.Cryptography;
+using NewLife.Log;
+
+#if NET7_0_OR_GREATER
+using System.Formats.Tar;
+#endif
 
 namespace System.IO;
 
 /// <summary>路径操作帮助</summary>
 /// <remarks>
 /// 文档 https://newlifex.com/core/path_helper
+/// 
+/// GetBasePath 依赖BasePath，支持参数和环境变量设置，主要用于存放X组件自身配置和日志等目录。
+/// GetFullPath 依赖BaseDirectory，默认为应用程序域基础目录，支持参数和环境变量设置，此时跟GetBasePath保持一致。
+/// 
+/// GetFullPath更多用于表示当前工作目录，不可以轻易修改为Environment.CurrentDirectory。
+/// 在vs运行应用时，Environment.CurrentDirectory是源码文件所在目录，而不是可执行文件目录。
+/// 在StarAgent运行应用时，BasePath和Environment.CurrentDirectory都被修改为工作目录。
 /// </remarks>
 public static class PathHelper
 {
@@ -14,15 +29,13 @@ public static class PathHelper
     /// <remarks>
     /// 为了适应函数计算，该路径将支持从命令行参数和环境变量读取
     /// </remarks>
-    public static String BasePath { get; set; }
+    public static String? BasePath { get; set; }
 
-    /// <summary>基础目录。GetBasePath依赖于此，默认为当前应用程序域基础目录。已弃用，请使用BasePath</summary>
+    /// <summary>基准目录。GetFullPath依赖于此，默认为当前应用程序域基础目录。支持BasePath参数修改</summary>
     /// <remarks>
     /// 为了适应函数计算，该路径将支持从命令行参数和环境变量读取
     /// </remarks>
-    [Obsolete("=>BasePath")]
-    public static String BaseDirectory { get => BasePath; set => BasePath = value; }
-
+    public static String? BaseDirectory { get; set; }
     #endregion
 
     #region 静态构造
@@ -42,6 +55,8 @@ public static class PathHelper
 
         // 环境变量
         if (dir.IsNullOrEmpty()) dir = NewLife.Runtime.GetEnvironmentVariable("BasePath");
+
+        if (!dir.IsNullOrEmpty()) BaseDirectory = dir;
 
         // 最终取应用程序域。Linux下编译为单文件时，应用程序释放到临时目录，应用程序域基路径不对，当前目录也不一定正确，唯有进程路径正确
         if (dir.IsNullOrEmpty()) dir = AppDomain.CurrentDomain.BaseDirectory;
@@ -71,7 +86,7 @@ public static class PathHelper
 
         var dir = mode switch
         {
-            1 => AppDomain.CurrentDomain.BaseDirectory ?? BasePath,
+            1 => BaseDirectory ?? AppDomain.CurrentDomain.BaseDirectory ?? BasePath,
             2 => BasePath,
             3 => Environment.CurrentDirectory,
             _ => "",
@@ -181,10 +196,10 @@ public static class PathHelper
     /// <param name="path"></param>
     /// <param name="ps"></param>
     /// <returns></returns>
-    public static String CombinePath(this String path, params String[] ps)
+    public static String CombinePath(this String? path, params String[] ps)
     {
+        path ??= String.Empty;
         if (ps == null || ps.Length <= 0) return path;
-        if (path == null) path = String.Empty;
 
         //return Path.Combine(path, path2);
         foreach (var item in ps)
@@ -211,11 +226,9 @@ public static class PathHelper
         using var fs = file.OpenRead();
         fs.Position = offset;
 
-        if (count <= 0) count = (Int32)(fs.Length - offset);
+        if (count < 0) count = (Int32)(fs.Length - offset);
 
-        var buf = new Byte[count];
-        fs.Read(buf, 0, buf.Length);
-        return buf;
+        return fs.ReadExactly(count);
     }
 
     /// <summary>把数据写入文件指定位置</summary>
@@ -229,7 +242,8 @@ public static class PathHelper
         {
             fs.Position = offset;
 
-            fs.Write(data, offset, data.Length);
+            // offset 仅作为文件写入位置，源数组从 0 开始写入
+            fs.Write(data, 0, data.Length);
         }
 
         return file;
@@ -327,6 +341,7 @@ public static class PathHelper
         }
 
         fs.SetLength(fs.Position);
+        fs.Flush();
 
         return fs.Position;
     }
@@ -344,6 +359,9 @@ public static class PathHelper
 
         if (fi.Name.EndsWithIgnoreCase(".zip"))
         {
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP
+            ZipFile.ExtractToDirectory(fi.FullName, destDir, overwrite);
+#else
             using var zip = ZipFile.Open(fi.FullName, ZipArchiveMode.Read, null);
             var di = Directory.CreateDirectory(destDir);
             var fullName = di.FullName;
@@ -351,17 +369,17 @@ public static class PathHelper
             {
                 var fullPath = Path.GetFullPath(Path.Combine(fullName, item.FullName));
                 if (!fullPath.StartsWith(fullName, StringComparison.OrdinalIgnoreCase))
-                    throw new IOException("IO_ExtractingResultsInOutside");
+                    throw new IOException(L.T("The archive entry '{0}' would be extracted outside the target directory.", item.FullName));
 
                 if (Path.GetFileName(fullPath).Length == 0)
                 {
-                    if (item.Length != 0L) throw new IOException("IO_DirectoryNameWithData");
+                    if (item.Length != 0L) throw new IOException(L.T("The archive entry '{0}' is a directory but has non-zero length.", item.FullName));
 
                     Directory.CreateDirectory(fullPath);
                 }
                 else
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
+                    Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                     try
                     {
                         item.ExtractToFile(fullPath, overwrite);
@@ -369,11 +387,31 @@ public static class PathHelper
                     catch { }
                 }
             }
+#endif
+        }
+        else if (fi.Name.EndsWithIgnoreCase(".tar", ".tar.gz", ".tgz"))
+        {
+#if NET7_0_OR_GREATER
+            destDir.EnsureDirectory(false);
+            if (fi.Name.EndsWithIgnoreCase(".tar"))
+                System.Formats.Tar.TarFile.ExtractToDirectory(fi.FullName, destDir, overwrite);
+            else
+            {
+                using var fs = fi.OpenRead();
+                using var gs = new GZipStream(fs, CompressionMode.Decompress, true);
+                using var bs = new BufferedStream(gs);
+                System.Formats.Tar.TarFile.ExtractToDirectory(bs, destDir, overwrite);
+            }
+#else
+            TarFile.ExtractToDirectory(fi.FullName, destDir, overwrite);
+#endif
         }
         else
         {
-            throw new NotSupportedException();
-            //new SevenZip().Extract(fi.FullName, destDir);
+            if (NewLife.Runtime.Windows)
+                new SevenZip().Extract(fi.FullName, destDir);
+            else
+                throw new NotSupportedException();
         }
     }
 
@@ -392,10 +430,36 @@ public static class PathHelper
             using var zip = ZipFile.Open(destFile, ZipArchiveMode.Create);
             zip.CreateEntryFromFile(fi.FullName, fi.Name, CompressionLevel.Optimal);
         }
+        else if (destFile.EndsWithIgnoreCase(".tar", ".tar.gz", ".tgz"))
+        {
+#if NET7_0_OR_GREATER
+            if (destFile.EndsWithIgnoreCase(".tar"))
+            {
+                using var fs = new FileStream(destFile, FileMode.OpenOrCreate, FileAccess.Write);
+                using var tarWriter = new TarWriter(fs, TarEntryFormat.Pax, false);
+                tarWriter.WriteEntry(fi.FullName, fi.Name);
+                fs.SetLength(fs.Position);
+            }
+            else
+            {
+                using var fs = new FileStream(destFile, FileMode.OpenOrCreate, FileAccess.Write);
+                using var gs = new GZipStream(fs, CompressionMode.Compress, true);
+                using var tarWriter = new TarWriter(gs, TarEntryFormat.Pax, false);
+                tarWriter.WriteEntry(fi.FullName, fi.Name);
+
+                gs.Flush();
+                fs.SetLength(fs.Position);
+            }
+#else
+            TarFile.CreateFromDirectory(fi.FullName, destFile);
+#endif
+        }
         else
         {
-            throw new NotSupportedException();
-            //new SevenZip().Compress(fi.FullName, destFile);
+            if (NewLife.Runtime.Windows)
+                new SevenZip().Compress(fi.FullName, destFile);
+            else
+                throw new NotSupportedException();
         }
     }
     #endregion
@@ -411,7 +475,7 @@ public static class PathHelper
     /// <param name="exts">文件扩展列表。比如*.exe;*.dll;*.config</param>
     /// <param name="allSub">是否包含所有子孙目录文件</param>
     /// <returns></returns>
-    public static IEnumerable<FileInfo> GetAllFiles(this DirectoryInfo di, String exts = null, Boolean allSub = false)
+    public static IEnumerable<FileInfo> GetAllFiles(this DirectoryInfo di, String? exts = null, Boolean allSub = false)
     {
         if (di == null || !di.Exists) yield break;
 
@@ -434,17 +498,20 @@ public static class PathHelper
     /// <param name="allSub">是否包含所有子孙目录文件</param>
     /// <param name="callback">复制每一个文件之前的回调</param>
     /// <returns></returns>
-    public static String[] CopyTo(this DirectoryInfo di, String destDirName, String exts = null, Boolean allSub = false, Action<String> callback = null)
+    public static String[] CopyTo(this DirectoryInfo di, String destDirName, String? exts = null, Boolean allSub = false, Action<String>? callback = null)
     {
-        if (!di.Exists) return new String[0];
+        if (!di.Exists) return [];
 
         var list = new List<String>();
 
         // 来源目录根，用于截断
         var root = di.FullName.EnsureEnd(Path.DirectorySeparatorChar.ToString());
+        // 规范化根分隔符，确保和 FileInfo.FullName 使用相同分隔符
+        var normalizedRoot = Path.GetFullPath(root).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar).EnsureEnd(Path.DirectorySeparatorChar.ToString());
         foreach (var item in di.GetAllFiles(exts, allSub))
         {
-            var name = item.FullName.TrimStart(root);
+            var full = Path.GetFullPath(item.FullName).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            var name = full.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) ? full[normalizedRoot.Length..] : full;
             var dst = destDirName.CombinePath(name);
             callback?.Invoke(name);
             item.CopyTo(dst.EnsureDirectory(true), true);
@@ -462,19 +529,21 @@ public static class PathHelper
     /// <param name="allSub">是否包含所有子孙目录文件</param>
     /// <param name="callback">复制每一个文件之前的回调</param>
     /// <returns></returns>
-    public static String[] CopyToIfNewer(this DirectoryInfo di, String destDirName, String exts = null, Boolean allSub = false, Action<String> callback = null)
+    public static String[] CopyToIfNewer(this DirectoryInfo di, String destDirName, String? exts = null, Boolean allSub = false, Action<String>? callback = null)
     {
         var dest = destDirName.AsDirectory();
-        if (!dest.Exists) return new String[0];
+        if (!dest.Exists) return [];
 
         var list = new List<String>();
 
         // 目标目录根，用于截断
         var root = dest.FullName.EnsureEnd(Path.DirectorySeparatorChar.ToString());
+        var normalizedRoot = Path.GetFullPath(root).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar).EnsureEnd(Path.DirectorySeparatorChar.ToString());
         // 遍历目标目录，拷贝同名文件
         foreach (var item in dest.GetAllFiles(exts, allSub))
         {
-            var name = item.FullName.TrimStart(root);
+            var full = Path.GetFullPath(item.FullName).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            var name = full.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) ? full[normalizedRoot.Length..] : full;
             var fi = di.FullName.CombinePath(name).AsFile();
             //fi.CopyToIfNewer(item.FullName);
             if (fi.Exists && item.Exists && fi.LastWriteTime > item.LastWriteTime)
@@ -494,7 +563,7 @@ public static class PathHelper
     /// <param name="exts">文件扩展列表。比如*.exe;*.dll;*.config</param>
     /// <param name="allSub">是否包含所有子孙目录文件</param>
     /// <returns></returns>
-    public static String[] CopyIfNewer(this DirectoryInfo di, String[] source, String exts = null, Boolean allSub = false)
+    public static String[] CopyIfNewer(this DirectoryInfo di, String[] source, String? exts = null, Boolean allSub = false)
     {
         var list = new List<String>();
         var cur = di.FullName;
@@ -503,7 +572,7 @@ public static class PathHelper
             // 跳过当前目录
             if (item.GetFullPath().EqualIgnoreCase(cur)) continue;
 
-            Console.WriteLine("复制 {0} => {1}", item, cur);
+            Console.WriteLine(L.T("Copy {0} => {1}", item, cur));
 
             try
             {
@@ -524,17 +593,147 @@ public static class PathHelper
     /// <summary>压缩</summary>
     /// <param name="di"></param>
     /// <param name="destFile"></param>
-    public static void Compress(this DirectoryInfo di, String destFile = null)
+    public static void Compress(this DirectoryInfo di, String? destFile = null) => Compress(di, destFile, false);
+
+    /// <summary>压缩</summary>
+    /// <param name="di"></param>
+    /// <param name="destFile"></param>
+    /// <param name="includeBaseDirectory"></param>
+    public static void Compress(this DirectoryInfo di, String? destFile, Boolean includeBaseDirectory)
     {
         if (destFile.IsNullOrEmpty()) destFile = di.Name + ".zip";
 
         if (File.Exists(destFile)) File.Delete(destFile);
 
         if (destFile.EndsWithIgnoreCase(".zip"))
-            ZipFile.CreateFromDirectory(di.FullName, destFile, CompressionLevel.Optimal, true);
+            ZipFile.CreateFromDirectory(di.FullName, destFile, CompressionLevel.Optimal, includeBaseDirectory);
+        else if (destFile.EndsWithIgnoreCase(".tar", ".tar.gz", ".tgz"))
+        {
+#if NET7_0_OR_GREATER
+            if (destFile.EndsWithIgnoreCase(".tar"))
+                System.Formats.Tar.TarFile.CreateFromDirectory(di.FullName, destFile, includeBaseDirectory);
+            else
+            {
+                using var fs = new FileStream(destFile, FileMode.OpenOrCreate, FileAccess.Write);
+                using var gs = new GZipStream(fs, CompressionMode.Compress, true);
+                System.Formats.Tar.TarFile.CreateFromDirectory(di.FullName, gs, includeBaseDirectory);
+                gs.Flush();
+                fs.SetLength(fs.Position);
+            }
+#else
+            TarFile.CreateFromDirectory(di.FullName, destFile);
+#endif
+        }
         else
-            //new SevenZip().Compress(di.FullName, destFile);
-            throw new NotSupportedException();
+        {
+            if (NewLife.Runtime.Windows)
+                new SevenZip().Compress(di.FullName, destFile);
+            else
+                throw new NotSupportedException();
+        }
+    }
+    #endregion
+
+    #region 文件哈希
+    /// <summary>验证文件哈希是否匹配预期值</summary>
+    /// <remarks>
+    /// 支持前缀算法标识（例如：md5$123..、sha1$ABC..、sha256$xxx、sha512$xxx、crc32$12345678），
+    /// 也支持无前缀自动识别：长度 8 为 CRC32，16/32 为 MD5，40 为 SHA1，64 为 SHA256，128 为 SHA512。
+    /// MD5 支持 16 位（前 8 字节）与 32 位两种表示形式。
+    /// </remarks>
+    /// <param name="file">要验证的文件</param>
+    /// <param name="hash">预期哈希值，允许带算法前缀，前后空白将被忽略</param>
+    /// <returns>返回哈希是否匹配</returns>
+    public static Boolean VerifyHash(this FileInfo file, String hash)
+    {
+        if (file == null || !file.Exists) return false;
+        if (String.IsNullOrWhiteSpace(hash)) return false;
+
+        hash = hash.Trim();
+
+        // 解析算法前缀，例如 md5$xxxx
+        var alg = default(String);
+        var value = hash;
+        var p = hash.IndexOf('$');
+        if (p > 0)
+        {
+            alg = hash[..p];
+            value = hash[(p + 1)..];
+        }
+
+        if (String.IsNullOrWhiteSpace(value)) return false;
+
+        value = value.Trim();
+
+        // 无前缀时，根据长度推断算法
+        if (alg.IsNullOrEmpty())
+        {
+            alg = value.Length switch
+            {
+                8 => "crc32",
+                16 or 32 => "md5",
+                40 => "sha1",
+                64 => "sha256",
+                128 => "sha512",
+                _ => null,
+            };
+            if (alg.IsNullOrEmpty()) throw new NotSupportedException(L.T("Please specify a hash algorithm prefix."));
+        }
+
+        var span = DefaultSpan.Current;
+        span?.AppendTag($"alg={alg} hash={value}");
+
+        // 根据算法名称计算文件哈希并比较，哈希值比较不区分大小写
+        if (alg.EqualIgnoreCase("md5"))
+        {
+            var md5 = file.MD5().ToHex();
+            span?.AppendTag($"md5={md5}");
+
+            // 16 位 MD5：取前 8 字节（16 个十六进制字符）
+            if (value.Length == 16)
+                return md5[..16].EqualIgnoreCase(value);
+
+            return md5.EqualIgnoreCase(value);
+        }
+
+        if (alg.EqualIgnoreCase("crc32", "crc"))
+        {
+            using var fs = file.OpenRead();
+            var actual = Crc32.Compute(fs).ToString("X8");
+            span?.AppendTag($"crc32={actual}");
+            return actual.EqualIgnoreCase(value);
+        }
+
+        if (alg.EqualIgnoreCase("sha1", "sha-1"))
+        {
+            using var sha1 = SHA1.Create();
+            using var fs = file.OpenRead();
+            var actual = sha1.ComputeHash(fs).ToHex();
+            span?.AppendTag($"sha1={actual}");
+            return actual.EqualIgnoreCase(value);
+        }
+
+        if (alg.EqualIgnoreCase("sha256", "sha-256"))
+        {
+            using var sha256 = SHA256.Create();
+            using var fs = file.OpenRead();
+            var actual = sha256.ComputeHash(fs).ToHex();
+            span?.AppendTag($"sha256={actual}");
+            return actual.EqualIgnoreCase(value);
+        }
+
+        if (alg.EqualIgnoreCase("sha512", "sha-512"))
+        {
+            using var sha512 = SHA512.Create();
+            using var fs = file.OpenRead();
+            var actual = sha512.ComputeHash(fs).ToHex();
+            span?.AppendTag($"sha512={actual}");
+            return actual.EqualIgnoreCase(value);
+        }
+
+        // 未能识别算法，认为验证失败
+        //return false;
+        throw new NotSupportedException(L.T("Only hash algorithms md5/crc/sha1/sha256/sha512 are supported."));
     }
     #endregion
 }

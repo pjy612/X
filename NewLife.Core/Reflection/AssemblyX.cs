@@ -1,14 +1,16 @@
-﻿using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.ComponentModel;
-using System.IO;
-using System.Linq;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using NewLife.Collections;
+using NewLife.Configuration;
 using NewLife.Log;
 
 namespace NewLife.Reflection;
+
+// 本类为程序集反射工具（动态加载/扫描/类型发现），属运行时加载边界：AOT 与单文件发布下
+// Location 为空、LoadFrom/GetTypes 等能力按需裁剪；相关 AOT 语义在每个方法上显式声明
 
 /// <summary>程序集辅助类。使用Create创建，保证每个程序集只有一个辅助类</summary>
 public class AssemblyX
@@ -17,19 +19,19 @@ public class AssemblyX
     /// <summary>程序集</summary>
     public Assembly Asm { get; }
 
-    private String _Name;
+    private String? _Name;
     /// <summary>名称</summary>
     public String Name => _Name ??= "" + Asm.GetName().Name;
 
-    private String _Version;
+    private String? _Version;
     /// <summary>程序集版本</summary>
     public String Version => _Version ??= "" + Asm.GetName().Version;
 
-    private String _Title;
+    private String? _Title;
     /// <summary>程序集标题</summary>
     public String Title => _Title ??= "" + Asm.GetCustomAttributeValue<AssemblyTitleAttribute, String>();
 
-    private String _FileVersion;
+    private String? _FileVersion;
     /// <summary>文件版本</summary>
     public String FileVersion
     {
@@ -46,9 +48,9 @@ public class AssemblyX
                 _FileVersion = ver;
             }
 
-            if (_FileVersion == null) _FileVersion = Asm.GetCustomAttributeValue<AssemblyFileVersionAttribute, String>();
+            _FileVersion ??= Asm.GetCustomAttributeValue<AssemblyFileVersionAttribute, String>();
 
-            if (_FileVersion == null) _FileVersion = "";
+            _FileVersion ??= "";
 
             return _FileVersion;
         }
@@ -71,16 +73,17 @@ public class AssemblyX
         }
     }
 
-    private String _Company;
+    private String? _Company;
     /// <summary>公司名称</summary>
     public String Company => _Company ??= "" + Asm.GetCustomAttributeValue<AssemblyCompanyAttribute, String>();
 
-    private String _Description;
+    private String? _Description;
     /// <summary>说明</summary>
     public String Description => _Description ??= "" + Asm.GetCustomAttributeValue<AssemblyDescriptionAttribute, String>();
 
     /// <summary>获取包含清单的已加载文件的路径或 UNC 位置。</summary>
-    public String Location
+    [UnconditionalSuppressMessage("AOT", "IL3000", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    public String? Location
     {
         get
         {
@@ -100,7 +103,7 @@ public class AssemblyX
     /// <summary>创建程序集辅助对象</summary>
     /// <param name="asm"></param>
     /// <returns></returns>
-    public static AssemblyX Create(Assembly asm)
+    public static AssemblyX? Create(Assembly? asm)
     {
         if (asm == null) return null;
 
@@ -113,47 +116,72 @@ public class AssemblyX
         AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
     }
 
-    private static Assembly OnAssemblyResolve(Object sender, ResolveEventArgs args)
-    {
-        var flag = XTrace.Log.Level <= LogLevel.Debug;
-        if (flag) XTrace.WriteLine("[{0}]请求加载[{1}]", args.RequestingAssembly?.FullName, args.Name);
-        //if (!flag) return null;
+    [ThreadStatic]
+    private static Int32 _resolving;
 
+    [UnconditionalSuppressMessage("AOT", "IL3000", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    private static Assembly? OnAssemblyResolve(Object? sender, ResolveEventArgs args)
+    {
+        if (_resolving > 0) return null;
+
+        var name = args.Name;
+        if (name.IsNullOrEmpty() || IsSatelliteResourceAssembly(name)) return null;
+
+        _resolving++;
         try
         {
             // 尝试在请求者所在目录加载
             var file = args.RequestingAssembly?.Location;
             if (!file.IsNullOrEmpty())
             {
-                var name = args.Name;
-                var p = name.IndexOf(',');
-                if (p > 0) name = name[..p];
+                var assemblyName = name;
+                var p = assemblyName.IndexOf(',');
+                if (p > 0) assemblyName = assemblyName[..p];
 
-                file = Path.GetDirectoryName(file).CombinePath(name + ".dll");
+                file = Path.GetDirectoryName(file).CombinePath(assemblyName + ".dll");
                 if (File.Exists(file)) return Assembly.LoadFrom(file);
             }
 
             // 辅助解析程序集。程序集加载过程中，被依赖程序集未能解析时，是否协助解析，默认false
-            if (Setting.Current.AssemblyResolve)
-                return OnResolve(args.Name);
+            // 只读已初始化的配置：未初始化则放弃本次辅助解析，绝不在此触发配置初始化。
+            // 解析回调可能在任意线程持有类初始化锁时被触发，而配置初始化会创建定时器并取用调度器监视器，
+            // 与“持有类初始化锁又需要调度器监视器”的线程形成互等死锁（实测：Runtime 类初始化 ⇄ 定时调度器监视器）
+            var setting = Config<Setting>.TryGetCurrent();
+            if (setting != null && setting.AssemblyResolve) return OnResolve(name);
         }
         catch (Exception ex)
         {
-            XTrace.WriteException(ex);
+            Trace.WriteLine(ex);
+            return null;
+        }
+        finally
+        {
+            _resolving--;
         }
 
         return null;
+    }
+
+    private static Boolean IsSatelliteResourceAssembly(String name)
+    {
+        var p = name.IndexOf(',');
+        if (p > 0) name = name[..p];
+
+        return name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase);
     }
     #endregion
 
     #region 扩展属性
     //private IEnumerable<Type> _Types;
     /// <summary>类型集合，当前程序集的所有类型，包括私有和内嵌，非内嵌请直接调用Asm.GetTypes()</summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
     public IEnumerable<Type> Types
     {
         get
         {
-            Type[] ts;
+            Type?[]? ts;
             try
             {
                 ts = Asm.GetTypes();
@@ -162,10 +190,10 @@ public class AssemblyX
             {
                 if (ex.LoaderExceptions != null && XTrace.Log.Level == LogLevel.Debug)
                 {
-                    XTrace.WriteLine("加载[{0}]{1}的类型时发生个{2}错误！", this, Location, ex.LoaderExceptions.Length);
+                    XTrace.WriteLine("Failed to load types from [{0}]{1} with {2} error(s).", this, Location, ex.LoaderExceptions.Length);
                     foreach (var le in ex.LoaderExceptions)
                     {
-                        XTrace.WriteException(le);
+                        if (le != null) XTrace.WriteException(le);
                     }
                 }
                 ts = ex.Types;
@@ -178,7 +206,11 @@ public class AssemblyX
                 if (item != null) yield return item;
             }
 
-            var queue = new Queue<Type>(ts);
+            var queue = new Queue<Type>();
+            foreach (var item in ts)
+            {
+                if (item != null) queue.Enqueue(item);
+            }
             while (queue.Count > 0)
             {
                 var item = queue.Dequeue();
@@ -210,6 +242,8 @@ public class AssemblyX
         if (asm == null) return false;
 
         var name = asm.FullName;
+        if (name.IsNullOrEmpty()) return false;
+
         if (name.EndsWith("PublicKeyToken=b77a5c561934e089")) return true;
         if (name.EndsWith("PublicKeyToken=b03f5f7f11d50a3a")) return true;
         if (name.EndsWith("PublicKeyToken=89845dcd8080cc91")) return true;
@@ -221,20 +255,20 @@ public class AssemblyX
 
     #region 静态属性
     /// <summary>入口程序集</summary>
-    public static AssemblyX Entry { get; set; } = Create(Assembly.GetEntryAssembly());
+    public static AssemblyX? Entry { get; set; } = Create(Assembly.GetEntryAssembly());
 
     /// <summary>
     /// 加载过滤器，如果返回 false 表示跳过加载。
     /// </summary>
-    public static Func<String, Boolean> ResolveFilter { get; set; }
+    public static Func<String, Boolean>? ResolveFilter { get; set; }
     #endregion
 
     #region 方法
-    private readonly ConcurrentDictionary<String, Type> typeCache2 = new();
+    private readonly ConcurrentDictionary<String, Type?> typeCache2 = new();
     /// <summary>从程序集中查找指定名称的类型</summary>
     /// <param name="typeName"></param>
     /// <returns></returns>
-    public Type GetType(String typeName)
+    public Type? GetType(String typeName)
     {
         if (String.IsNullOrEmpty(typeName)) throw new ArgumentNullException(nameof(typeName));
 
@@ -244,7 +278,8 @@ public class AssemblyX
     /// <summary>在程序集中查找类型</summary>
     /// <param name="typeName"></param>
     /// <returns></returns>
-    private Type GetTypeInternal(String typeName)
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "按名称从程序集动态获取类型；AOT 下未被保留的类型返回空（见分析稿 §5）")]
+    private Type? GetTypeInternal(String typeName)
     {
         var type = Asm.GetType(typeName);
         if (type != null) return type;
@@ -302,23 +337,35 @@ public class AssemblyX
     /// <param name="baseType">类型</param>
     /// <returns></returns>
     [EditorBrowsable(EditorBrowsableState.Advanced)]
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
     public IList<Type> FindPlugins(Type baseType)
     {
         // 如果type是null，则返回所有类型
         if (_plugins.TryGetValue(baseType, out var list)) return list;
 
-        list = new List<Type>();
+        Type?[]? types = null;
+        list = [];
         try
         {
-            foreach (var item in Asm.GetTypes())
-            {
-                if (item.IsInterface || item.IsAbstract || item.IsGenericType) continue;
-                if (item != baseType && item.As(baseType)) list.Add(item);
-            }
+            types = Asm.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            // 即使抛出加载异常，也有一部分类型可以用
+            types = ex.Types;
+            XTrace.WriteException(ex);
         }
         catch (Exception ex)
         {
             XTrace.WriteException(ex);
+        }
+
+        if (types != null)
+        {
+            foreach (var item in types)
+            {
+                if (item != null && !item.IsInterface && !item.IsAbstract && !item.IsGenericType && item != baseType && item.As(baseType)) list.Add(item);
+            }
         }
 
         _plugins.TryAdd(baseType, list);
@@ -332,6 +379,8 @@ public class AssemblyX
     /// <param name="isLoadAssembly">是否从未加载程序集中获取类型。使用仅反射的方法检查目标类型，如果存在，则进行常规加载</param>
     /// <param name="excludeGlobalTypes">指示是否应检查来自所有引用程序集的类型。如果为 false，则检查来自所有引用程序集的类型。 否则，只检查来自非全局程序集缓存 (GAC) 引用的程序集的类型。</param>
     /// <returns></returns>
+    [UnconditionalSuppressMessage("AOT", "IL3000", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
     public static IEnumerable<Type> FindAllPlugins(Type baseType, Boolean isLoadAssembly = false, Boolean excludeGlobalTypes = true)
     {
         var baseAssemblyName = baseType.Assembly.GetName().Name;
@@ -363,31 +412,32 @@ public class AssemblyX
                 }
             }
         }
-        if (isLoadAssembly)
+        if (!isLoadAssembly) yield break;
+
+        foreach (var item in ReflectionOnlyGetAssemblies())
         {
-            foreach (var item in ReflectionOnlyGetAssemblies())
+            //// 如果excludeGlobalTypes为true，则指检查来自非GAC引用的程序集
+            //if (excludeGlobalTypes && item.Asm.GlobalAssemblyCache) continue;
+
+            // 不搜索系统程序集，不搜索未引用基类所在程序集的程序集，优化性能
+            if (item.IsSystemAssembly || !IsReferencedFrom(item.Asm, baseAssemblyName)) continue;
+
+            var ts = item.FindPlugins(baseType);
+            if (ts != null && ts.Count > 0)
             {
-                //// 如果excludeGlobalTypes为true，则指检查来自非GAC引用的程序集
-                //if (excludeGlobalTypes && item.Asm.GlobalAssemblyCache) continue;
-
-                // 不搜索系统程序集，不搜索未引用基类所在程序集的程序集，优化性能
-                if (item.IsSystemAssembly || !IsReferencedFrom(item.Asm, baseAssemblyName)) continue;
-
-                var ts = item.FindPlugins(baseType);
-                if (ts != null && ts.Count > 0)
+                // 真实加载
+                if (XTrace.Debug)
                 {
-                    // 真实加载
-                    if (XTrace.Debug)
-                    {
-                        // 如果是本目录的程序集，去掉目录前缀
-                        var file = item.Asm.Location;
-                        var root = ".".GetFullPath();
-                        if (file.StartsWithIgnoreCase(root)) file = file.Substring(root.Length).TrimStart("\\");
-                        XTrace.WriteLine("AssemblyX.FindAllPlugins(\"{0}\") => {1}", baseType.FullName, file);
-                    }
-                    var asm2 = Assembly.LoadFrom(item.Asm.Location);
-                    ts = Create(asm2).FindPlugins(baseType);
-
+                    // 如果是本目录的程序集，去掉目录前缀
+                    var file = item.Asm.Location;
+                    var root = AppDomain.CurrentDomain.BaseDirectory;
+                    if (!root.IsNullOrEmpty() && file.StartsWithIgnoreCase(root)) file = file.Substring(root.Length).TrimPrefix("\\");
+                    XTrace.WriteLine("AssemblyX.FindAllPlugins(\"{0}\") => {1}", baseType.FullName, file);
+                }
+                var asm2 = Assembly.LoadFrom(item.Asm.Location);
+                ts = Create(asm2)?.FindPlugins(baseType);
+                if (ts != null)
+                {
                     foreach (var elm in ts)
                     {
                         if (!list.Contains(elm))
@@ -405,8 +455,11 @@ public class AssemblyX
     /// <param name="asm">程序集</param>
     /// <param name="baseAsmName">被引用程序集全名</param>
     /// <returns></returns>
-    private static Boolean IsReferencedFrom(Assembly asm, String baseAsmName)
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    private static Boolean IsReferencedFrom(Assembly asm, String? baseAsmName)
     {
+        if (baseAsmName.IsNullOrEmpty()) return false;
         if (asm.GetName().Name.EqualIgnoreCase(baseAsmName)) return true;
 
         foreach (var item in asm.GetReferencedAssemblies())
@@ -421,7 +474,11 @@ public class AssemblyX
     /// <param name="typeName">类型名</param>
     /// <param name="isLoadAssembly">是否从未加载程序集中获取类型。使用仅反射的方法检查目标类型，如果存在，则进行常规加载</param>
     /// <returns></returns>
-    public static Type GetType(String typeName, Boolean isLoadAssembly)
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("AOT", "IL3000", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "按类型名（含程序集限定名）动态解析类型；AOT 下未保留的类型返回空（见分析稿 §5）")]
+    public static Type? GetType(String typeName, Boolean isLoadAssembly)
     {
         var type = Type.GetType(typeName);
         if (type != null) return type;
@@ -436,16 +493,10 @@ public class AssemblyX
         }
 
         // 加速基础类型识别，忽略大小写
-        if (!typeName.Contains('.'))
+        if (!typeName.Contains('.') && Enum.TryParse<TypeCode>(typeName, true, out var code))
         {
-            foreach (var item in Enum.GetNames(typeof(TypeCode)))
-            {
-                if (typeName.EqualIgnoreCase(item))
-                {
-                    type = Type.GetType("System." + item);
-                    if (type != null) return type;
-                }
-            }
+            type = TypeCodeHelper.GetType(code);
+            if (type != null) return type;
         }
 
         // 尝试本程序集
@@ -488,7 +539,7 @@ public class AssemblyX
                 {
                     type = null;
                     var asm2 = Assembly.LoadFrom(file);
-                    var type2 = Create(asm2).GetType(typeName);
+                    var type2 = Create(asm2)?.GetType(typeName);
                     if (type2 == null) continue;
 
                     type = type2;
@@ -510,20 +561,26 @@ public class AssemblyX
     /// <summary>获取指定程序域所有程序集</summary>
     /// <param name="domain"></param>
     /// <returns></returns>
-    public static IEnumerable<AssemblyX> GetAssemblies(AppDomain domain = null)
+    public static IEnumerable<AssemblyX> GetAssemblies(AppDomain? domain = null)
     {
-        if (domain == null) domain = AppDomain.CurrentDomain;
+        domain ??= AppDomain.CurrentDomain;
 
         var asms = domain.GetAssemblies();
-        if (asms == null || asms.Length <= 0) return Enumerable.Empty<AssemblyX>();
+        if (asms == null || asms.Length <= 0) yield break;
 
-        return asms.Select(item => Create(item));
+        //return asms.Select(item => Create(item));
+        foreach (var item in asms)
+        {
+            var rs = Create(item);
+            if (rs != null) yield return rs;
+        }
     }
 
-    private static ICollection<String> _AssemblyPaths;
+    private static ICollection<String>? _AssemblyPaths;
     /// <summary>程序集目录集合</summary>
     public static ICollection<String> AssemblyPaths
     {
+        [return: NotNull]
         get
         {
             if (_AssemblyPaths == null)
@@ -533,13 +590,22 @@ public class AssemblyX
                 var basedir = AppDomain.CurrentDomain.BaseDirectory;
                 if (!basedir.IsNullOrEmpty()) set.Add(basedir);
 
+                basedir = ".".GetBasePath();
+                if (!basedir.IsNullOrEmpty()) set.Add(basedir);
+
+                basedir = ".".GetFullPath();
+                if (!basedir.IsNullOrEmpty()) set.Add(basedir);
+
+                basedir = Environment.CurrentDirectory;
+                if (!basedir.IsNullOrEmpty()) set.Add(basedir);
+
                 var cfg = Setting.Current;
                 if (!cfg.PluginPath.IsNullOrEmpty())
                 {
-                    var plugin = cfg.PluginPath.GetFullPath();
+                    var plugin = cfg.PluginPath.GetBasePath();
                     if (!set.Contains(plugin)) set.Add(plugin);
 
-                    plugin = cfg.PluginPath.GetBasePath();
+                    plugin = cfg.PluginPath.GetFullPath();
                     if (!set.Contains(plugin)) set.Add(plugin);
                 }
 
@@ -560,6 +626,8 @@ public class AssemblyX
         var loadeds2 = AppDomain.CurrentDomain.ReflectionOnlyGetAssemblies().Select(e => Create(e)).ToList();
         foreach (var item in loadeds2)
         {
+            if (item == null) continue;
+
             if (loadeds.Any(e => e.Location.EqualIgnoreCase(item.Location))) continue;
             // 尽管目录不一样，但这两个可能是相同的程序集
             // 这里导致加载了不同目录的同一个程序集，然后导致对象容器频繁报错
@@ -580,12 +648,19 @@ public class AssemblyX
     /// <summary>只反射加载指定路径的所有程序集。NETCore不支持只反射加载，该方法动态加载DLL后返回</summary>
     /// <param name="path"></param>
     /// <returns></returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
     public static IEnumerable<AssemblyX> ReflectionOnlyLoad(String path)
     {
         if (!Directory.Exists(path)) yield break;
 
         // 先返回已加载的只加载程序集
-        var loadeds2 = AppDomain.CurrentDomain.ReflectionOnlyGetAssemblies().Select(e => Create(e)).ToList();
+        //var loadeds2 = AppDomain.CurrentDomain.ReflectionOnlyGetAssemblies().Select(e => Create(e)).ToList();
+        var loadeds2 = new List<AssemblyX>();
+        foreach (var item in AppDomain.CurrentDomain.ReflectionOnlyGetAssemblies())
+        {
+            var ax = Create(item);
+            if (ax != null) loadeds2.Add(ax);
+        }
 
         // 再去遍历目录
         var ss = Directory.GetFiles(path, "*.*", SearchOption.TopDirectoryOnly);
@@ -604,7 +679,7 @@ public class AssemblyX
             if (loadeds.Any(e => e.Location.EqualIgnoreCase(item)) ||
                 loadeds2.Any(e => e.Location.EqualIgnoreCase(item))) continue;
 
-            Assembly asm = null;
+            Assembly? asm = null;
             try
             {
                 asm = Assembly.LoadFrom(item);
@@ -633,6 +708,7 @@ public class AssemblyX
 
     /// <summary>获取当前应用程序的所有程序集，不包括系统程序集，仅限本目录</summary>
     /// <returns></returns>
+    [UnconditionalSuppressMessage("AOT", "IL3000", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
     public static List<AssemblyX> GetMyAssemblies()
     {
         var list = new List<AssemblyX>();
@@ -643,21 +719,24 @@ public class AssemblyX
             // 加载程序集列表很容易抛出异常，全部屏蔽
             try
             {
-                if (asmx.FileVersion.IsNullOrEmpty()) continue;
+                //if (asmx.FileVersion.IsNullOrEmpty()) continue;
 
                 var file = "";
-                //file = asmx.Asm.CodeBase;
+#if NETFRAMEWORK
+                file = asmx.Asm.CodeBase;
+#endif
                 if (file.IsNullOrEmpty()) file = asmx.Asm.Location;
                 if (file.IsNullOrEmpty()) continue;
 
                 if (file.StartsWith("file:///"))
                 {
-                    file = file.TrimStart("file:///");
+                    file = file.TrimPrefix("file:///");
                     if (Path.DirectorySeparatorChar == '\\')
                         file = file.Replace('/', '\\');
                     else
                         file = file.Replace('\\', '/').EnsureStart("/");
                 }
+                if (file.IsNullOrEmpty()) continue;
                 if (!file.StartsWithIgnoreCase(cur)) continue;
 
                 if (!hs.Contains(file))
@@ -674,7 +753,8 @@ public class AssemblyX
     /// <summary>在对程序集的解析失败时发生</summary>
     /// <param name="name"></param>
     /// <returns></returns>
-    private static Assembly OnResolve(String name)
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "运行时类型反射/动态加载边界；AOT 下不受支持或需改用泛型入口（见分析稿 §4/§5）")]
+    private static Assembly? OnResolve(String name)
     {
         foreach (var item in AppDomain.CurrentDomain.GetAssemblies())
         {
@@ -744,7 +824,7 @@ public class AssemblyX
     /// <returns></returns>
     public static DateTime GetCompileTime(String version)
     {
-        var ss = version?.Split(new Char[] { '.' });
+        var ss = version?.Split(['.']);
         if (ss == null || ss.Length < 4) return DateTime.MinValue;
 
         var d = ss[2].ToInt();
@@ -795,3 +875,4 @@ public class AssemblyX
     }
     #endregion
 }
+

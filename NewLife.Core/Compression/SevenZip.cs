@@ -1,141 +1,140 @@
-﻿using System;
-using System.IO;
+﻿using System.Text;
 using NewLife.Log;
 using NewLife.Web;
 
-namespace NewLife.Compression
+namespace NewLife.Compression;
+
+/// <summary>7Zip</summary>
+public class SevenZip
 {
-    /// <summary>7Zip</summary>
-    public class SevenZip
+    #region  基础
+    private static readonly String _7z = null!;
+
+    static SevenZip()
     {
-        #region  基础
-        private static readonly String _7z = null;
+        var p = "";
+        var set = Setting.Current;
 
-        static SevenZip()
+        // 附近文件（7z.exe 是Windows程序，其它平台不能选用）
+        if (Runtime.Windows)
         {
-            var p = "";
+            p = "7z.exe".GetFullPath();
+            if (!File.Exists(p)) p = set.PluginPath.CombinePath("7z.exe").GetFullPath();
+            if (!File.Exists(p)) p = "7z/7z.exe".GetFullPath();
+            if (!File.Exists(p)) p = "../7z/7z.exe".GetFullPath();
+            if (!File.Exists(p)) p = "";
+        }
 
-            #region 附近文件
-            if (p.IsNullOrEmpty())
+        // 系统已安装的7-Zip
+        if (p.IsNullOrEmpty()) p = FindInstalled();
+
+        // 自动下载（插件包为Windows可执行文件，仅Windows平台启用）
+        if (p.IsNullOrEmpty() && Runtime.Windows)
+        {
+            XTrace.WriteLine("Preparing to download the 7z extension package");
+
+            var url = set.PluginServer;
+            var client = new WebClientX()
             {
-                var f = "../7z/7z.exe".GetFullPath();
-                if (File.Exists(f)) p = f;
-
-                f = "7z/7z.exe".GetFullPath();
+                Log = XTrace.Log
+            };
+            var dir = set.PluginPath;
+            var file = client.DownloadLinkAndExtract(url, "7z", dir);
+            if (Directory.Exists(dir))
+            {
+                var f = dir.CombinePath("7z.exe");
                 if (File.Exists(f)) p = f;
             }
-            #endregion
+        }
 
-            #region X组件缓存
-            var cache = Path.GetPathRoot(".".GetFullPath()).CombinePath(@"\X\7z").GetFullPath();
-            if (p.IsNullOrEmpty())
+        if (!p.IsNullOrEmpty()) _7z = p.GetFullPath();
+
+        XTrace.WriteLine("7z directory: {0}", _7z);
+    }
+
+    /// <summary>查找系统已安装的7-Zip</summary>
+    /// <returns>7z 全路径，未找到时返回空字符串</returns>
+    private static String FindInstalled()
+    {
+        if (Runtime.Windows)
+        {
+            foreach (var folder in new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
             {
-                var f = cache.CombinePath("7z.exe");
-                if (File.Exists(f)) p = f;
+                var root = Environment.GetFolderPath(folder);
+                if (root.IsNullOrEmpty()) continue;
+
+                var file = root.CombinePath("7-Zip", "7z.exe");
+                if (File.Exists(file)) return file;
             }
-            #endregion
-
-            #region 自动下载
-            if (p.IsNullOrEmpty())
+        }
+        else
+        {
+            // Unix：在 PATH 中查找 7z/7za/7zr（发行版 p7zip、Homebrew 等安装的可执行文件）
+            var path = Environment.GetEnvironmentVariable("PATH");
+            if (!path.IsNullOrEmpty())
             {
-                XTrace.WriteLine("准备下载7z扩展包");
+                foreach (var dir in path.Split(Path.PathSeparator))
+                {
+                    if (dir.IsNullOrEmpty()) continue;
 
-                var url = Setting.Current.PluginServer;
-                var client = new WebClientX()
-                {
-                    Log = XTrace.Log
-                };
-                var dir = cache;
-                var file = client.DownloadLinkAndExtract(url, "7z", dir);
-                if (Directory.Exists(dir))
-                {
-                    var f = dir.CombinePath("7z.exe");
-                    if (File.Exists(f)) p = f;
+                    foreach (var name in new[] { "7z", "7za", "7zr", "7zz" })
+                    {
+                        var file = Path.Combine(dir, name);
+                        if (File.Exists(file)) return file;
+                    }
                 }
             }
-            #endregion
-
-            if (!p.IsNullOrEmpty()) _7z = p.GetFullPath();
-
-            XTrace.WriteLine("7Z目录 {0}", _7z);
         }
 
-        /// <summary>实例化</summary>
-        public SevenZip()
-        {
-#if DEBUG
-            Log = XTrace.Log;
-#endif
-        }
-        #endregion
-
-        #region 压缩/解压缩        
-        /// <summary>压缩文件</summary>
-        /// <param name="path"></param>
-        /// <param name="destFile"></param>
-        /// <returns></returns>
-        public Boolean Compress(String path, String destFile)
-        {
-            if (Directory.Exists(path)) path = path.GetFullPath().EnsureEnd("\\") + "*";
-
-            return Run($"a \"{destFile}\" \"{path}\" -mx9 -ssw");
-        }
-
-        /// <summary>解压缩文件</summary>
-        /// <param name="file"></param>
-        /// <param name="destDir"></param>
-        /// <param name="overwrite">是否覆盖目标同名文件</param>
-        /// <returns></returns>
-        public Boolean Extract(String file, String destDir, Boolean overwrite = false)
-        {
-            destDir.EnsureDirectory(false);
-
-            var args = $"x \"{file}\" -o\"{destDir}\" -y -r";
-            if (overwrite)
-                args += " -aoa";
-            else
-                args += " -aos";
-
-            return Run(args);
-        }
-
-        private Boolean Run(String args)
-        {
-            WriteLog("{0} {1}", _7z, args);
-
-            //var p = new Process();
-            //p.StartInfo.WindowStyle = ProcessWindowStyle.Minimized; // 隐藏窗口            
-            //p.StartInfo.FileName = _7z;
-            //p.StartInfo.CreateNoWindow = false;
-            //p.StartInfo.Arguments = args;
-            //p.Start();
-            //p.WaitForExit();
-
-            //var rs = 0;
-            //if (p.HasExited)
-            //{
-            //    rs = p.ExitCode;
-            //    p.Close();
-            //    if (rs != 0 && rs != 1) return false;
-            //}
-            //return true;
-
-            var rs = _7z.Run(args, 5000);
-            return rs == 0;
-        }
-        #endregion
-
-        #region 日志
-        /// <summary>日志</summary>
-        public ILog Log { get; set; } = Logger.Null;
-
-        /// <summary>写日志</summary>
-        /// <param name="format"></param>
-        /// <param name="args"></param>
-        public void WriteLog(String format, params Object[] args)
-        {
-            Log?.Info(format, args);
-        }
-        #endregion
+        return "";
     }
+    #endregion
+
+    #region 压缩/解压缩        
+    /// <summary>压缩文件</summary>
+    /// <param name="path"></param>
+    /// <param name="destFile"></param>
+    /// <returns></returns>
+    public void Compress(String path, String destFile)
+    {
+        // 目录末尾通配符须用平台目录分隔符：Windows 的反斜杠在 Linux/macOS 上会按字面路径匹配
+        // 不到任何文件，7z 以警告码 1 退出并生成空归档，解压端再表现为“文件缺失”
+        if (Directory.Exists(path)) path = Path.Combine(path.GetFullPath(), "*");
+
+        Run($"a \"{destFile}\" \"{path}\" -mx9 -ssw");
+    }
+
+    /// <summary>解压缩文件</summary>
+    /// <param name="file"></param>
+    /// <param name="destDir"></param>
+    /// <param name="overwrite">是否覆盖目标同名文件</param>
+    /// <returns></returns>
+    public void Extract(String file, String destDir, Boolean overwrite = false)
+    {
+        destDir.EnsureDirectory(false);
+
+        var args = $"x \"{file}\" -o\"{destDir}\" -y -r";
+        if (overwrite)
+            args += " -aoa";
+        else
+            args += " -aos";
+
+        Run(args);
+    }
+
+    private Int32 Run(String args)
+    {
+        if (_7z.IsNullOrEmpty()) throw new InvalidOperationException(L.T("7z.exe was not found; compression/decompression cannot be performed."));
+
+        // 7z 的执行时间取决于数据体积，大目录/冷备份常达数分钟，不能使用固定的短超时：
+        // 超时会把 7z 强杀在半途，留下被截断的归档，而旧实现忽略返回值，表现为"静默成功"。
+        // 负值表示一直等到 7z 自身退出，与本类文档描述的同步语义一致
+        var rs = _7z.Run(args, -1);
+
+        // 退出码：0 成功，1 警告（通常仍有可用产物），2 及以上为失败
+        if (rs >= 2) throw new InvalidOperationException(L.T("7z execution failed with exit code {0}.", rs));
+
+        return rs;
+    }
+    #endregion
 }

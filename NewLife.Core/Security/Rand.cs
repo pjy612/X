@@ -1,5 +1,4 @@
-﻿using System;
-using System.Reflection;
+﻿using System.Reflection;
 using System.Security.Cryptography;
 using NewLife.Collections;
 using NewLife.Reflection;
@@ -39,7 +38,7 @@ public static class Rand
     }
 
     [ThreadStatic]
-    private static Byte[] _buf;
+    private static Byte[]? _buf;
     /// <summary>返回一个指定范围内的随机数</summary>
     /// <remarks>
     /// 调用平均耗时37.76ns，其中GC耗时77.56%
@@ -51,13 +50,14 @@ public static class Rand
     {
         if (max <= min) throw new ArgumentOutOfRangeException(nameof(max));
 
-        if (_buf == null) _buf = new Byte[4];
+        _buf ??= new Byte[4];
         _rnd.GetBytes(_buf);
 
         var n = BitConverter.ToInt32(_buf, 0);
         if (min == Int32.MinValue && max == Int32.MaxValue) return n;
-        if (min == 0 && max == Int32.MaxValue) return Math.Abs(n);
-        if (min == Int32.MinValue && max == 0) return -Math.Abs(n);
+        // Math.Abs(Int32.MinValue) 会抛 OverflowException，改用掩码取绝对值（极低概率但必现崩溃）
+        if (min == 0 && max == Int32.MaxValue) return n & Int32.MaxValue;
+        if (min == Int32.MinValue && max == 0) return -(n & Int32.MaxValue);
 
         var num = max - min;
         // 不要进行复杂运算，看做是生成从0到(max-min)的随机数，然后再加上min即可
@@ -76,32 +76,18 @@ public static class Rand
 #if NET6_0_OR_GREATER
         return RandomNumberGenerator.GetBytes(count);
 #elif NETFRAMEWORK || NETSTANDARD2_0
-        return new Random().NextBytes(count);
+        // 使用加密安全随机数生成器，与 Next() 保持一致（原 new Random() 非加密安全）
+        if (count < 0) throw new ArgumentOutOfRangeException(nameof(count));
+
+        var data = new Byte[count];
+        _rnd.GetBytes(data);
+        return data;
 #else
         var buf = new Byte[count];
         RandomNumberGenerator.Fill(buf);
         return buf;
 #endif
     }
-
-#if NETFRAMEWORK || NETSTANDARD2_0
-    /// <summary>
-    /// 返回随机数填充的指定长度的数组
-    /// </summary>
-    /// <param name="random"></param>
-    /// <param name="length">数组长度</param>
-    /// <returns>随机数填充的指定长度的数组</returns>
-    private static byte[] NextBytes(this Random random, int length)
-    {
-        if (length < 0)
-        {
-            throw new ArgumentOutOfRangeException("length");
-        }
-        byte[] data = new byte[length];
-        random.NextBytes(data);
-        return data;
-    }
-#endif
 
     /// <summary>返回指定长度随机字符串</summary>
     /// <param name="length">长度</param>
@@ -128,7 +114,7 @@ public static class Rand
             sb.Append(ch);
         }
 
-        return sb.Put(true);
+        return sb.Return(true);
     }
 
     /// <summary>随机填充指定对象的属性。可用于构造随机数据进行测试</summary>
@@ -141,7 +127,23 @@ public static class Rand
 
         foreach (var pi in value.GetType().GetProperties(true))
         {
-            switch (pi.PropertyType.GetTypeCode())
+            // 可空类型，有一定记录填充null
+            var type = pi.PropertyType;
+            if (type.IsNullable())
+            {
+                // 10%几率填充null
+                if (Next(0, 10) == 0)
+                {
+                    pi.SetValue(value, null);
+                    continue;
+                }
+
+                type = Nullable.GetUnderlyingType(type) ?? type;
+            }
+
+            // 给基础类型填充数据
+            var code = type.GetTypeCode();
+            switch (code)
             {
                 case TypeCode.Empty:
                 case TypeCode.Object:
@@ -151,19 +153,19 @@ public static class Rand
                     pi.SetValue(value, Next(2) > 0);
                     break;
                 case TypeCode.Char:
-                    pi.SetValue(value, (Char)Next(0, 256));
+                    pi.SetValue(value, (Char)Next(Char.MinValue, Char.MaxValue));
                     break;
                 case TypeCode.SByte:
-                    pi.SetValue(value, (SByte)Next(-128, 127));
+                    pi.SetValue(value, (SByte)Next(SByte.MinValue, SByte.MaxValue));
                     break;
                 case TypeCode.Byte:
-                    pi.SetValue(value, (Byte)Next(0, 256));
+                    pi.SetValue(value, (Byte)Next(Byte.MinValue, Byte.MaxValue));
                     break;
                 case TypeCode.Int16:
                     pi.SetValue(value, (Int16)Next(Int16.MinValue, Int16.MaxValue));
                     break;
                 case TypeCode.UInt16:
-                    pi.SetValue(value, (UInt16)Next(0, UInt16.MaxValue));
+                    pi.SetValue(value, (UInt16)Next(UInt16.MinValue, UInt16.MaxValue));
                     break;
                 case TypeCode.Int32:
                     pi.SetValue(value, Next());
@@ -194,6 +196,23 @@ public static class Rand
                     break;
                 default:
                     break;
+            }
+
+            // 支持特殊类型
+            if (code == TypeCode.Object)
+            {
+                if (type == typeof(Guid))
+                    pi.SetValue(value, Guid.NewGuid());
+                else if (type == typeof(DateTimeOffset))
+                    pi.SetValue(value, new DateTimeOffset(new DateTime(2000, 1, 1).AddSeconds(Next(20 * 365 * 24 * 3600))));
+                else if (type == typeof(TimeSpan))
+                    pi.SetValue(value, new TimeSpan(Next(20 * 24 * 3600 * 1000)));
+#if NET6_0_OR_GREATER
+                else if (type == typeof(DateOnly))
+                    pi.SetValue(value, new DateOnly(Next(1000, 2300), Next(1, 13), Next(1, 29)));
+                else if (type == typeof(TimeOnly))
+                    pi.SetValue(value, new TimeOnly(Next(0, 24), Next(0, 60), Next(0, 60), Next(0, 1000)));
+#endif
             }
         }
 

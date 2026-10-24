@@ -1,5 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Specialized;
+using System.Diagnostics.CodeAnalysis;
+using NewLife.Collections;
 using NewLife.Data;
 using NewLife.Model;
 using NewLife.Reflection;
@@ -13,6 +15,9 @@ namespace NewLife.Serialization;
 public class JsonReader
 {
     #region 属性
+    /// <summary>序列化选项。控制属性命名策略、枚举字符串等反序列化行为</summary>
+    public JsonOptions? Options { get; set; }
+
     /// <summary>是否使用UTC时间</summary>
     public Boolean UseUTCDateTime { get; set; }
 
@@ -25,13 +30,13 @@ public class JsonReader
     /// <typeparam name="T"></typeparam>
     /// <param name="json"></param>
     /// <returns></returns>
-    public T Read<T>(String json) => (T)Read(json, typeof(T));
+    public T? Read<T>(String json) => (T?)Read(json, typeof(T));
 
     /// <summary>读取Json到指定类型</summary>
     /// <param name="json"></param>
     /// <param name="type"></param>
     /// <returns></returns>
-    public Object Read(String json, Type type)
+    public Object? Read(String json, Type type)
     {
         // 解码得到字典或列表
         var obj = new JsonParser(json).Decode();
@@ -45,11 +50,11 @@ public class JsonReader
     /// <param name="type">模板类型</param>
     /// <param name="target">目标对象</param>
     /// <returns></returns>
-    public Object ToObject(Object jobj, Type type, Object target)
+    public Object? ToObject(Object? jobj, Type? type, Object? target)
     {
         if (type == null && target != null) type = target.GetType();
 
-        if (jobj == null || type.IsAssignableFrom(jobj.GetType())) return jobj;
+        if (jobj == null || type == null || type.IsAssignableFrom(jobj.GetType())) return jobj;
 
         // Json对象是字典，目标类型可以是字典或复杂对象
         if (jobj is IDictionary<String, Object> vdic)
@@ -70,7 +75,7 @@ public class JsonReader
 
             if (vlist.Count == 0) return target;
 
-            throw new InvalidCastException($"Json数组无法转为目标类型[{type.FullName}]，仅支持数组和List<T>/IList<T>");
+            throw new InvalidCastException(L.T("Json array cannot be converted to target type [{0}], only arrays and List<T>/IList<T>are supported", type.FullName));
         }
 
         if (type != null && jobj.GetType() != type)
@@ -86,18 +91,26 @@ public class JsonReader
     /// <param name="type"></param>
     /// <param name="target">目标对象</param>
     /// <returns></returns>
-    private IList ParseList(IList<Object> vlist, Type type, Object target)
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "按运行时类型动态构造集合；AOT 下请使用泛型读写入口")]
+    private IList? ParseList(IList<Object> vlist, Type type, Object? target)
     {
         var elmType = type.GetGenericArguments().FirstOrDefault();
 
         // 处理一下type是IList<>的情况
-        if (type.IsInterface) type = typeof(List<>).MakeGenericType(elmType);
+        if (type.IsInterface && elmType != null) type = typeof(List<>).MakeGenericType(elmType);
 
         // 创建列表
         var list = (target ?? type.CreateInstance()) as IList;
+        if (list == null) return null;
+
         foreach (var item in vlist)
         {
-            if (item == null) continue;
+            if (item == null)
+            {
+                // 值类型元素添加默认值，引用类型添加 null，保持列表元素位置
+                list.Add(elmType != null && elmType.IsValueType ? elmType.CreateInstance() : null);
+                continue;
+            }
 
             var val = ToObject(item, elmType, null);
             list.Add(val);
@@ -110,17 +123,25 @@ public class JsonReader
     /// <param name="type"></param>
     /// <param name="target">目标对象</param>
     /// <returns></returns>
-    private Array ParseArray(IList<Object> list, Type type, Object target)
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "按运行时类型动态构造数组；AOT 下请使用泛型读写入口")]
+    private Array ParseArray(IList<Object> list, Type type, Object? target)
     {
         var elmType = type?.GetElementTypeEx();
         if (elmType == null) elmType = typeof(Object);
 
-        if (target is not Array arr) arr = Array.CreateInstance(elmType, list.Count);
+        // 如果元素组长度不足，则创建新数组。主要是某些成员使用数组类型，然后使用[]初始化，导致数组长度为零
+        if (target is not Array arr || arr.Length < list.Count) arr = Array.CreateInstance(elmType, list.Count);
+
         // 如果源数组有值，则最大只能创建源数组那么多项，抛弃多余项
         for (var i = 0; i < list.Count && i < arr.Length; i++)
         {
             var item = list[i];
-            if (item == null) continue;
+            if (item == null)
+            {
+                // 值类型元素默认值，引用类型 null，保持数组元素位置
+                arr.SetValue(elmType != null && elmType.IsValueType ? elmType.CreateInstance() : null, i);
+                continue;
+            }
 
             var val = ToObject(item, elmType, arr.GetValue(i));
             arr.SetValue(val, i);
@@ -134,7 +155,8 @@ public class JsonReader
     /// <param name="type"></param>
     /// <param name="target">目标对象</param>
     /// <returns></returns>
-    private IDictionary ParseDictionary(IDictionary<String, Object> dic, Type type, IDictionary target)
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "按运行时类型动态构造字典；AOT 下请使用泛型读写入口")]
+    private IDictionary? ParseDictionary(IDictionary<String, Object> dic, Type type, IDictionary? target)
     {
         var types = type.GetGenericArguments();
 
@@ -145,30 +167,33 @@ public class JsonReader
 
             target = type.CreateInstance() as IDictionary;
         }
+        if (target == null) return null;
+
         foreach (var kv in dic)
         {
             var key = ToObject(kv.Key, types[0], null);
             var val = ToObject(kv.Value, types[1], null);
-            target.Add(key, val);
+            if (key != null) target.Add(key, val);
         }
 
         return target;
     }
 
-    private readonly Dictionary<Object, Int32> _circobj = new();
-    private readonly Dictionary<Int32, Object> _cirrev = new();
+    private readonly Dictionary<Object, Int32> _circobj = [];
+    private readonly Dictionary<Int32, Object> _cirrev = [];
     /// <summary>字典转复杂对象，反射属性赋值</summary>
     /// <param name="dic"></param>
     /// <param name="type"></param>
     /// <param name="target">目标对象</param>
     /// <returns></returns>
-    internal Object ParseObject(IDictionary<String, Object> dic, Type type, Object target)
+    internal Object? ParseObject(IDictionary<String, Object> dic, Type type, Object? target)
     {
         if (type == typeof(NameValueCollection)) return CreateNV(dic);
         if (type == typeof(StringDictionary)) return CreateSD(dic);
         if (type == typeof(Object)) return dic;
 
-        if (target == null) target = Provider.GetService(type) ?? type.CreateInstance();
+        target ??= Provider.GetService(type) ?? Provider.CreateInstance(type) ?? type.CreateInstance();
+        if (target == null) return null;
 
         if (type.IsDictionary()) return CreateDic(dic, type, target);
 
@@ -182,7 +207,8 @@ public class JsonReader
         // 扩展属性
 
         // 遍历所有可用于序列化的属性
-        var props = target.GetType().GetProperties(true).ToDictionary(e => SerialHelper.GetName(e), e => e);
+        var targetType = target.GetType();
+        var props = targetType.GetProperties(true).ToDictionary(e => SerialHelper.GetName(e), e => e);
         foreach (var item in dic)
         {
             var v = item.Value;
@@ -190,8 +216,13 @@ public class JsonReader
 
             if (!props.TryGetValue(item.Key, out var pi))
             {
-                // 可能有小写
-                pi = props.Values.FirstOrDefault(e => e.Name.EqualIgnoreCase(item.Key));
+                // 根据命名策略将 Json 键名反转为 PascalCase 再匹配
+                var normalizedKey = NormalizeKeyToPascal(item.Key);
+                if (normalizedKey != null)
+                    props.TryGetValue(normalizedKey, out pi);
+
+                // 兜底：大小写不敏感匹配
+                pi ??= props.Values.FirstOrDefault(e => e.Name.EqualIgnoreCase(item.Key));
                 if (pi == null)
                 {
                     // 可能有扩展属性
@@ -203,13 +234,19 @@ public class JsonReader
             if (!pi.CanWrite) continue;
 
             var pt = pi.PropertyType;
-            if (pt.GetTypeCode() != TypeCode.Object)
-                target.SetValue(pi, ChangeType(v, pt));
+            if (pt.IsBaseType())
+                MemberAccessorTable.SetValue(target, targetType, pi, ChangeType(v, pt));
             else
             {
-                var orig = target.GetValue(pi);
+                var orig = MemberAccessorTable.GetValue(target, targetType, pi);
                 var val = ToObject(v, pt, orig);
-                if (val != orig) target.SetValue(pi, val);
+                if (val != orig)
+                {
+                    if (target is IModel dst)
+                        dst[pi.Name] = val;
+                    else
+                        MemberAccessorTable.SetValue(target, targetType, pi, val);
+                }
             }
         }
         return target;
@@ -217,7 +254,43 @@ public class JsonReader
     #endregion
 
     #region 辅助
-    private Object ChangeType(Object value, Type type)
+    /// <summary>根据命名策略将 Json 键名反转为 PascalCase 属性名，用于属性查找</summary>
+    /// <param name="key">Json 键名</param>
+    /// <returns>反转后的 PascalCase 名称。无需转换或无法转换时返回 null</returns>
+    private String? NormalizeKeyToPascal(String key)
+    {
+        var naming = Options?.PropertyNaming ?? PropertyNaming.None;
+        if (naming == PropertyNaming.None || key.Length == 0) return null;
+
+        // CamelCase: 首字母大写即可, userName → UserName
+        if (naming == PropertyNaming.CamelCase)
+        {
+            if (Char.IsUpper(key[0])) return null;
+            return Char.ToUpper(key[0]) + key[1..];
+        }
+
+        // SnakeCase / KebabCase: 按分隔符拆分后每段首字母大写拼接
+        var separator = naming is PropertyNaming.SnakeCaseLower or PropertyNaming.SnakeCaseUpper ? '_' : '-';
+        if (key.IndexOf(separator) < 0) return null;
+
+        var parts = key.Split(separator);
+        var sb = Pool.StringBuilder.Get();
+        foreach (var part in parts)
+        {
+            if (part.Length > 0)
+            {
+                sb.Append(Char.ToUpper(part[0]));
+                for (var i = 1; i < part.Length; i++)
+                {
+                    sb.Append(Char.ToLower(part[i]));
+                }
+            }
+        }
+        return sb.Return(true);
+    }
+
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "类型名来自 JSON 文本中的 $type 描述，属运行时加载；AOT 下目标类型若被静态引用或声明上下文则可用")]
+    private Object? ChangeType(Object value, Type type)
     {
         // 支持可空类型
         if (type.IsGenericType && type.GetGenericTypeDefinition().Equals(typeof(Nullable<>)))
@@ -230,7 +303,8 @@ public class JsonReader
         if (type == typeof(Int32)) return value.ToInt();
         if (type == typeof(Int64)) return value.ToLong();
         if (type == typeof(String)) return value + "";
-        if (type == typeof(Type) && value is String str) return Type.GetType(str) ?? Type.GetType("System." + str);
+        if (type == typeof(Type) && value is String str)
+            return Type.GetType(str) ?? (Enum.TryParse<TypeCode>(str, true, out var code) ? TypeCodeHelper.GetType(code) : null);
 
         if (type.IsEnum) return Enum.Parse(type, value + "");
         if (type == typeof(DateTime)) return CreateDateTime(value);
@@ -246,18 +320,18 @@ public class JsonReader
             return Convert.FromBase64String(value + "");
         }
 
-        if (type == typeof(Packet))
+        if (type == typeof(IPacket))
         {
-            if (value is Packet v) return v;
+            if (value is IPacket v) return v;
 
-            return new Packet(Convert.FromBase64String(value + ""));
+            return new ArrayPacket(Convert.FromBase64String(value + ""));
         }
-
         if (type == typeof(TimeSpan)) return TimeSpan.Parse(value + "");
 
-        if (type.GetTypeCode() == TypeCode.Object) return null;
+        if (value is String str2) return str2.ChangeType(type);
+        if (type.IsBaseType()) return value.ChangeType(type);
 
-        return value.ChangeType(type);
+        return null;
     }
 
     private StringDictionary CreateSD(IDictionary<String, Object> dic)
@@ -278,19 +352,25 @@ public class JsonReader
         return nv;
     }
 
-    private IDictionary CreateDic(IDictionary<String, Object> dic, Type type, Object obj)
+    private IDictionary? CreateDic(IDictionary<String, Object> dic, Type type, Object obj)
     {
         var nv = obj as IDictionary;
+        if (nv == null) return null;
+
         if (type.IsGenericType && type.GetGenericArguments().Length >= 2)
         {
             var tval = type.GetGenericArguments()[1];
             foreach (var item in dic)
-                nv.Add(item.Key, item.Value.ChangeType(tval));
+            {
+                nv.Add(item.Key, tval == null ? item.Value : item.Value.ChangeType(tval));
+            }
         }
         else
         {
             foreach (var item in dic)
+            {
                 nv.Add(item.Key, item.Value);
+            }
         }
 
         return nv;
@@ -381,15 +461,17 @@ public class JsonReader
         return DateTime.MinValue;
     }
 
-    private Object CreateDictionary(IList<Object> list, Type type, Object target)
+    private Object? CreateDictionary(IList<Object> list, Type type, Object? target)
     {
         var types = type.GetGenericArguments();
         var dic = (target ?? type.CreateInstance()) as IDictionary;
-        foreach (IDictionary<String, Object> values in list)
+        if (dic == null) return null;
+
+        foreach (IDictionary<String, Object?> values in list)
         {
             var key = ToObject(values["k"], types[0], null);
             var val = ToObject(values["v"], types[1], null);
-            dic.Add(key, val);
+            if (key != null) dic.Add(key, val);
         }
 
         return dic;

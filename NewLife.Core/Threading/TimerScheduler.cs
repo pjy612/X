@@ -1,33 +1,53 @@
 ﻿using System.Diagnostics;
 using NewLife.Log;
+using NewLife.Model;
 using NewLife.Reflection;
 
-#nullable enable
 namespace NewLife.Threading;
 
 /// <summary>定时器调度器</summary>
-public class TimerScheduler
+public class TimerScheduler : IDisposable, ILogFeature
 {
     #region 静态
-    private TimerScheduler(String name) => Name = name;
-
-    private static readonly Dictionary<String, TimerScheduler> _cache = new();
+    private static readonly Dictionary<String, TimerScheduler> _cache = [];
+    static TimerScheduler()
+    {
+        Host.RegisterExit(ClearAll);
+    }
 
     /// <summary>创建指定名称的调度器</summary>
     /// <param name="name"></param>
     /// <returns></returns>
     public static TimerScheduler Create(String name)
     {
-        if (_cache.TryGetValue(name, out var ts)) return ts;
+        if (_cache.TryGetValue(name, out var scheduler)) return scheduler;
         lock (_cache)
         {
-            if (_cache.TryGetValue(name, out ts)) return ts;
+            if (_cache.TryGetValue(name, out scheduler)) return scheduler;
 
-            ts = new TimerScheduler(name);
-            _cache[name] = ts;
+            scheduler = new TimerScheduler(name);
+            _cache[name] = scheduler;
 
-            return ts;
+            // 跟随默认调度器使用日志
+            if (_cache.TryGetValue("Default", out var def) && def.Log != null)
+                scheduler.Log = def.Log;
+
+            return scheduler;
         }
+    }
+
+    private static void ClearAll()
+    {
+        var schedulers = _cache;
+        if (schedulers == null || schedulers.Count == 0) return;
+
+        XTrace.WriteLine("TimerScheduler.ClearAll [{0}]", schedulers.Count);
+        foreach (var item in schedulers)
+        {
+            item.Value.Dispose();
+        }
+
+        schedulers.Clear();
     }
 
     /// <summary>默认调度器</summary>
@@ -37,6 +57,58 @@ public class TimerScheduler
     private static TimerScheduler? _Current;
     /// <summary>当前调度器</summary>
     public static TimerScheduler? Current { get => _Current; private set => _Current = value; }
+
+    /// <summary>全局时间提供者。影响所有调度器</summary>
+    public static TimeProvider GlobalTimeProvider { get; set; } = TimeProvider.System;
+    #endregion
+
+    #region 构造
+    private TimerScheduler(String name) => Name = name;
+
+    /// <summary>销毁</summary>
+    public void Dispose()
+    {
+        if (_disposing) return;
+        _disposing = true;
+
+        WriteLog("Destroying timer scheduler: {0}", Name);
+
+        // 先设置退出标志，然后唤醒调度线程
+        Wake();
+
+        // 等待调度线程退出，最多等待5秒
+        var th = thread;
+        if (th != null && th.IsAlive)
+        {
+            if (!th.Join(5000))
+            {
+#if NETFRAMEWORK
+                try
+                {
+                    WriteLog("The scheduler thread did not exit within 5 seconds; forcing termination.");
+                    // 在.NET Framework中可以使用Abort，但在现代.NET中已移除
+                    th.Abort();
+                }
+                catch { }
+#endif
+            }
+        }
+
+        var ts = Timers?.ToList();
+        if (ts != null && ts.Count > 0)
+        {
+            XTrace.WriteLine("{0}Timer.ClearAll [{1}]", Name, ts.Count);
+            foreach (var item in ts)
+            {
+                item.Dispose();
+            }
+        }
+
+        // 清理资源
+        _waitForTimer?.Dispose();
+        _waitForTimer = null;
+        thread = null;
+    }
     #endregion
 
     #region 属性
@@ -49,10 +121,14 @@ public class TimerScheduler
     /// <summary>最大耗时。超过时报警告日志，默认500ms</summary>
     public Int32 MaxCost { get; set; } = 500;
 
+    /// <summary>时间提供者。该调度器下所有绝对定时器，均从此获取当前时间</summary>
+    public TimeProvider? TimeProvider { get; set; }
+
     private Thread? thread;
     private Int32 _tid;
+    private volatile Boolean _disposing;
 
-    private TimerX[] Timers = new TimerX[0];
+    private TimerX[] Timers = [];
     #endregion
 
     /// <summary>把定时器加入队列</summary>
@@ -60,8 +136,9 @@ public class TimerScheduler
     public void Add(TimerX timer)
     {
         if (timer == null) throw new ArgumentNullException(nameof(timer));
+        if (_disposing) throw new ObjectDisposedException(nameof(TimerScheduler));
 
-        using var span = DefaultTracer.Instance?.NewSpan("timer:Add", timer.ToString());
+        using var span = DefaultTracer.Instance?.NewSpan("timer:Add", new { Name, timer = timer.ToString() });
 
         timer.Id = Interlocked.Increment(ref _tid);
         WriteLog("Timer.Add {0}", timer);
@@ -85,7 +162,7 @@ public class TimerScheduler
                 };
                 thread.Start();
 
-                WriteLog("启动定时调度器：{0}", Name);
+                WriteLog("Starting timer scheduler: {0}", Name);
             }
 
             Wake();
@@ -99,7 +176,7 @@ public class TimerScheduler
     {
         if (timer == null || timer.Id == 0) return;
 
-        using var span = DefaultTracer.Instance?.NewSpan("timer:Remove", reason + " " + timer);
+        using var span = DefaultTracer.Instance?.NewSpan("timer:Remove", new { Name, timer = timer.ToString(), reason });
         WriteLog("Timer.Remove {0} reason:{1}", timer, reason);
 
         lock (this)
@@ -136,21 +213,26 @@ public class TimerScheduler
     private void Process(Object? state)
     {
         Current = this;
-        while (true)
+        while (!_disposing)
         {
             // 准备好定时器列表
             var arr = Timers;
 
-            // 如果没有任务，则销毁线程
+            // 如果没有任务，则销毁线程。在锁内重新检查并置空，避免与 Add 并发时：
+            // Add 看到旧线程非空而不创建新线程，随后本线程销毁导致新定时器无人消费
             if (arr.Length == 0 && _period == 60_000)
             {
-                WriteLog("没有可用任务，销毁线程");
+                lock (this)
+                {
+                    if (Timers.Length == 0 && _period == 60_000)
+                    {
+                        WriteLog("No tasks available; destroying the thread.");
 
-                var th = thread;
-                thread = null;
-                //th?.Abort();
+                        thread = null;
 
-                break;
+                        break;
+                    }
+                }
             }
 
             try
@@ -161,39 +243,31 @@ public class TimerScheduler
                 _period = 60_000;
                 foreach (var timer in arr)
                 {
+                    // 如果正在销毁，跳出循环
+                    if (_disposing) break;
+
                     if (!timer.Calling && CheckTime(timer, now))
                     {
-                        // 是否能够执行
-                        if (timer.CanExecute == null || timer.CanExecute())
-                        {
-                            // 必须在主线程设置状态，否则可能异步线程还没来得及设置开始状态，主线程又开始了新的一轮调度
-                            timer.Calling = true;
-                            if (timer.IsAsyncTask)
-                                Task.Factory.StartNew(ExecuteAsync, timer);
-                            else if (!timer.Async)
-                                Execute(timer);
-                            else
-                                //Task.Factory.StartNew(() => ProcessItem(timer));
-                                // 不需要上下文流动
-                                ThreadPool.UnsafeQueueUserWorkItem(s =>
-                                {
-                                    try
-                                    {
-                                        Execute(s);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        XTrace.WriteException(ex);
-                                    }
-                                }, timer);
-                            // 内部线程池，让异步任务有公平竞争CPU的机会
-                            //ThreadPoolX.QueueUserWorkItem(Execute, timer);
-                        }
-                        // 即使不能执行，也要设置下一次的时间
+                        // 必须在主线程设置状态，否则可能异步线程还没来得及设置开始状态，主线程又开始了新的一轮调度
+                        timer.Calling = true;
+                        if (timer.IsAsyncTask)
+                            Task.Factory.StartNew(ExecuteAsync, timer);
+                        else if (!timer.Async)
+                            Execute(timer);
                         else
-                        {
-                            OnFinish(timer);
-                        }
+                            //Task.Factory.StartNew(() => ProcessItem(timer));
+                            // 不需要上下文流动，捕获所有异常
+                            ThreadPool.UnsafeQueueUserWorkItem(s =>
+                            {
+                                try
+                                {
+                                    Execute(s);
+                                }
+                                catch (Exception ex)
+                                {
+                                    XTrace.WriteException(ex);
+                                }
+                            }, timer);
                     }
                 }
             }
@@ -201,9 +275,14 @@ public class TimerScheduler
             catch (ThreadInterruptedException) { break; }
             catch { }
 
+            // 如果正在销毁，立即退出
+            if (_disposing) break;
+
             _waitForTimer ??= new AutoResetEvent(false);
             if (_period > 0) _waitForTimer.WaitOne(_period, true);
         }
+
+        WriteLog("Scheduler thread exited: {0}", Name);
     }
 
     /// <summary>检查定时器是否到期</summary>
@@ -217,7 +296,7 @@ public class TimerScheduler
         if (p is < 10 and > 0)
         {
             // 周期0表示只执行一次
-            if (p is < 10 and > 0) XTrace.WriteLine("为了避免占用过多CPU资源，TimerX禁止小于{1}ms<10ms的任务调度，关闭任务{0}", timer, p);
+            if (p is < 10 and > 0) XTrace.WriteLine("To avoid excessive CPU usage, TimerX rejects task scheduling with intervals below 10 ms ({1} ms); task {0} is disabled.", timer, p);
             timer.Dispose();
             return false;
         }
@@ -256,13 +335,13 @@ public class TimerScheduler
             var target = timer.Target.Target;
             if (target == null && !timer.Method.IsStatic)
             {
-                Remove(timer, "委托已不存在（GC回收委托所在对象）");
+                Remove(timer, "The delegate target has been collected by GC");
                 timer.Dispose();
                 return;
             }
 
             var func = timer.Method.As<TimerCallback>(target);
-            func(timer.State);
+            func!(timer.State);
         }
         catch (ThreadAbortException) { throw; }
         catch (ThreadInterruptedException) { throw; }
@@ -302,13 +381,13 @@ public class TimerScheduler
             var target = timer.Target.Target;
             if (target == null && !timer.Method.IsStatic)
             {
-                Remove(timer, "委托已不存在（GC回收委托所在对象）");
+                Remove(timer, "The delegate target has been collected by GC");
                 timer.Dispose();
                 return;
             }
 
             var func = timer.Method.As<Func<Object?, Task>>(target);
-            await func(timer.State);
+            await func!(timer.State).ConfigureAwait(false);
         }
         catch (ThreadAbortException) { throw; }
         catch (ThreadInterruptedException) { throw; }
@@ -330,7 +409,7 @@ public class TimerScheduler
     {
         timer.Cost = timer.Cost == 0 ? ms : (timer.Cost + ms) / 2;
 
-        if (ms > MaxCost && !timer.Async && !timer.IsAsyncTask) XTrace.WriteLine("任务 {0} 耗时过长 {1:n0}ms，建议使用异步任务Async=true", timer, ms);
+        if (ms > MaxCost && !timer.Async && !timer.IsAsyncTask) XTrace.WriteLine("Task {0} took too long ({1:n0} ms); consider using an async task (Async=true).", timer, ms);
 
         timer.Timers++;
         OnFinish(timer);
@@ -361,15 +440,18 @@ public class TimerScheduler
             _period = p;
     }
 
+    /// <summary>获取当前时间。该调度器下所有绝对定时器，均从此获取当前时间</summary>
+    /// <returns></returns>
+    public DateTime GetNow() => (TimeProvider ?? GlobalTimeProvider).GetUtcNow().LocalDateTime;
+
     /// <summary>已重载。</summary>
     /// <returns></returns>
     public override String ToString() => Name;
 
-    #region 设置
+    #region 日志
     /// <summary>日志</summary>
     public ILog Log { get; set; } = Logger.Null;
 
-    private void WriteLog(String format, params Object[] args) => Log?.Info(Name + format, args);
+    private void WriteLog(String format, params Object?[] args) => Log?.InfoPrefixed(Name, format, args);
     #endregion
 }
-#nullable restore

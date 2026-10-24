@@ -1,0 +1,109 @@
+﻿using NewLife.Data;
+
+namespace NewLife.Messaging;
+
+/// <summary>事件上下文</summary>
+/// <remarks>
+/// <para>事件分发过程中携带的协调对象，可由订阅者通过 <see cref="IExtend"/> 接口读写自定义数据。</para>
+/// <para>新代码建议关注 <see cref="EventContext"/> 的 Topic/ClientId 数据项；
+/// 非泛型 <see cref="IEventBus"/> 引用仅为兼容性保留，可视为类型标记。</para>
+/// </remarks>
+public interface IEventContext
+{
+    /// <summary>事件总线</summary>
+    /// <remarks>
+    /// <para>由总线创建上下文时填充，便于处理器访问总线能力（如再次发布事件）。</para>
+    /// <para>注意：当上下文来自对象池时，该属性在分发完成、上下文归还时会被重置为 <see langword="null"/>；
+    /// 处理器内若需保留总线引用，应在回调内立即捕获到局部变量。</para>
+    /// </remarks>
+    IEventBus? EventBus { get; }
+}
+
+/// <summary>事件处理器</summary>
+/// <remarks>
+/// 实现应尽量保持幂等（允许重复投递时不产生副作用），并在耗时操作中尊重 <c>cancellationToken</c>。
+/// </remarks>
+/// <typeparam name="TEvent">事件类型</typeparam>
+public interface IEventHandler<TEvent>
+{
+    /// <summary>处理事件</summary>
+    /// <param name="event">事件</param>
+    /// <param name="context">事件上下文。用于在发布者、订阅者及中间处理器之间传递协调数据，如 Topic、ClientId 等</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>表示处理过程的任务</returns>
+    Task HandleAsync(TEvent @event, IEventContext? context, CancellationToken cancellationToken);
+}
+
+/// <summary>事件总线工厂</summary>
+/// <remarks>
+/// 通过实现本接口，可为每个主题创建自定义的事件总线实例：
+/// <list type="bullet">
+/// <item><description><b>进程内总线（默认）</b>：不设置工厂时，<see cref="EventHub{TEvent}.GetEventBus"/> 自动创建 <see cref="EventBus{TEvent}"/>。</description></item>
+/// <item><description><b>集群总线（扩展点）</b>：实现集群工厂，在 PublishAsync 时先向本地 <see cref="EventBus{TEvent}"/> 分发（唤醒同进程等待者），
+/// 再推送到外部消息通道（Redis Stream / 星尘 StarDust 等）。各集群节点后台消费任务收到外部消息后，
+/// 调用本地 <see cref="EventHub{TEvent}.GetEventBus"/> 发布，即可唤醒任意节点上通过 ReceiveAsync 等待的调用方。</description></item>
+/// </list>
+/// <para>工厂实现可能在没有任何可用通道时返回 <see langword="null"/>（例如星尘降级工厂在Redis与星尘通道都不可用时），
+/// 调用方应自行处理空值；<see cref="EventHub{TEvent}.GetEventBus"/> 内部已回退到进程内总线。</para>
+/// </remarks>
+public interface IEventBusFactory
+{
+    /// <summary>创建事件总线，可发布消息或订阅消息</summary>
+    /// <typeparam name="TEvent">事件类型</typeparam>
+    /// <param name="topic">事件主题</param>
+    /// <param name="clientId">客户标识/消息分组</param>
+    /// <returns>事件总线实例；没有任何可用通道时返回 <see langword="null"/></returns>
+    IEventBus<TEvent>? CreateEventBus<TEvent>(String topic, String clientId = "");
+}
+
+/// <summary>事件总线。强类型的事件发布/订阅，统一异步 API</summary>
+/// <remarks>
+/// <para><b>设计理念</b>：以异步为一等公民。三大基础操作均为异步签名，方便桥接到远程总线、Redis、消息队列等异步实现；
+/// 同步调用方可通过 <see cref="EventBusExtensions"/> 提供的扩展方法或直接 <c>.Result</c> 退化使用。</para>
+/// <para><b>实现约束</b>：</para>
+/// <list type="bullet">
+/// <item><description><b>幂等订阅</b>：相同 <c>clientId</c> 重复订阅应覆盖前一次订阅，不抛异常。</description></item>
+/// <item><description><b>排除回环</b>：发布时若 <see cref="EventContext"/> 的 <c>ClientId</c> 与某订阅者同名，应跳过该订阅者。
+/// 该字段不在 <see cref="IEventContext"/> 上（接口不能加成员，否则实现者二进制断裂），故默认实现只识别 <see cref="EventContext"/>；
+/// 自定义上下文实现需自行保证回环排除，可先转成 <see cref="EventContext"/> 再发布。</description></item>
+/// <item><description><b>错误隔离</b>：默认实现不应让单个订阅者异常中断其他订阅者（严格模式由具体实现自行开关）。</description></item>
+/// </list>
+/// </remarks>
+/// <typeparam name="TEvent">事件类型</typeparam>
+public interface IEventBus<TEvent>
+{
+    /// <summary>发布事件</summary>
+    /// <param name="event">事件</param>
+    /// <param name="context">事件上下文。可携带主题、客户端标识等元数据</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>成功处理该事件的处理器数量</returns>
+    Task<Int32> PublishAsync(TEvent @event, IEventContext? context = null, CancellationToken cancellationToken = default);
+
+    /// <summary>订阅事件</summary>
+    /// <param name="handler">事件处理器</param>
+    /// <param name="clientId">客户标识。同一标识重复订阅时覆盖前一次</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>是否订阅成功</returns>
+    Task<Boolean> SubscribeAsync(IEventHandler<TEvent> handler, String clientId = "", CancellationToken cancellationToken = default);
+
+    /// <summary>取消订阅</summary>
+    /// <param name="clientId">客户标识</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>是否成功取消订阅</returns>
+    Task<Boolean> UnsubscribeAsync(String clientId = "", CancellationToken cancellationToken = default);
+}
+
+/// <summary>非泛型事件总线接口。仅为兼容旧版 <see cref="IEventContext.EventBus"/> 字段保留</summary>
+/// <remarks>
+/// <para>新代码请使用强类型 <see cref="IEventBus{TEvent}"/>。本接口只保留一个弱类型发布方法，订阅/取消订阅等一律走强类型接口。</para>
+/// <para><c>PublishAsync(Object)</c> 由具体实现 <see cref="EventBus{TEvent}"/> 显式接口实现，避免泛型接口的引用传递在编译期产生歧义。</para>
+/// </remarks>
+public interface IEventBus
+{
+    /// <summary>发布事件（弱类型）</summary>
+    /// <param name="event">事件对象</param>
+    /// <param name="context">事件上下文</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>成功处理该事件的处理器数量</returns>
+    Task<Int32> PublishAsync(Object @event, IEventContext? context = null, CancellationToken cancellationToken = default);
+}

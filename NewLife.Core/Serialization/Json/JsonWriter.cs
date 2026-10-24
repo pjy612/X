@@ -16,6 +16,9 @@ namespace NewLife.Serialization;
 public class JsonWriter
 {
     #region 属性
+    /// <summary>配置选项</summary>
+    public JsonOptions Options { get; set; } = new();
+
     /// <summary>使用UTC时间。默认false</summary>
     public Boolean UseUTCDateTime { get; set; }
 
@@ -23,10 +26,12 @@ public class JsonWriter
     public Boolean LowerCase { get; set; }
 
     /// <summary>使用驼峰命名</summary>
-    public Boolean CamelCase { get; set; }
+    [Obsolete("=>Options")]
+    public Boolean CamelCase { get => Options.PropertyNaming == PropertyNaming.CamelCase; set => Options.PropertyNaming = value ? PropertyNaming.CamelCase : PropertyNaming.None; }
 
     /// <summary>忽略空值。默认false</summary>
-    public Boolean IgnoreNullValues { get; set; }
+    [Obsolete("=>Options")]
+    public Boolean IgnoreNullValues { get => Options.IgnoreNullValues; set => Options.IgnoreNullValues = value; }
 
     /// <summary>忽略只读属性。默认false</summary>
     public Boolean IgnoreReadOnlyProperties { get; set; }
@@ -34,20 +39,24 @@ public class JsonWriter
     /// <summary>忽略注释。默认true</summary>
     public Boolean IgnoreComment { get; set; } = true;
 
-    /// <summary>忽略循环引用。遇到循环引用时写{}，默认true</summary>
-    public Boolean IgnoreCircle { get; set; } = true;
+    /// <summary>忽略循环引用。遇到循环引用时写{}，默认false</summary>
+    [Obsolete("=>Options")]
+    public Boolean IgnoreCycles => Options.IgnoreCycles;
 
     /// <summary>枚举使用字符串。默认false使用数字</summary>
-    public Boolean EnumString { get; set; }
+    [Obsolete("=>Options")]
+    public Boolean EnumString { get => Options.EnumString; set => Options.EnumString = value; }
 
     /// <summary>缩进。默认false</summary>
-    public Boolean Indented { get; set; }
+    [Obsolete("=>Options")]
+    public Boolean Indented { get => Options.WriteIndented; set => Options.WriteIndented = value; }
 
     ///// <summary>智能缩进，内层不换行。默认false</summary>
     //public Boolean SmartIndented { get; set; }
 
-    /// <summary>长整型作为字符串序列化。避免长整型传输给前端时精度丢失，默认false</summary>
-    public Boolean Int64AsString { get; set; }
+    /// <summary>长整型作为字符串序列化。避免长整型传输给前端时精度丢失，只有值真的超过前端接受范围时才会进行转换，默认false</summary>
+    [Obsolete("=>Options")]
+    public Boolean Int64AsString { get => Options.Int64AsString; set => Options.Int64AsString = value; }
 
     ///// <summary>整数序列化为十六进制</summary>
     //public Boolean IntAsHex { get; set; }
@@ -56,7 +65,7 @@ public class JsonWriter
     public Boolean ByteArrayAsHex { get; set; }
 
     /// <summary>缩进字符数。默认2</summary>
-    public Int32 IndentedLength { get; set; } = 4;
+    public Int32 IndentedLength { get; set; } = 2;
 
     /// <summary>最大序列化深度。超过时不再序列化，而不是抛出异常，默认5</summary>
     public Int32 MaxDepth { get; set; } = 5;
@@ -76,22 +85,32 @@ public class JsonWriter
     /// <param name="nullValue">是否写控制。默认true</param>
     /// <param name="camelCase">是否驼峰命名。默认false</param>
     /// <returns></returns>
+    [Obsolete("=>ToJson(Object obj, JsonOptions jsonOptions)")]
     public static String ToJson(Object obj, Boolean indented = false, Boolean nullValue = true, Boolean camelCase = false)
     {
-        var jw = new JsonWriter
-        {
-            IgnoreNullValues = !nullValue,
-            CamelCase = camelCase,
-            Indented = indented,
-            //SmartIndented = indented,
-        };
+        var jw = new JsonWriter();
+        jw.Options.IgnoreNullValues = !nullValue;
+        //jw.Options.CamelCase = camelCase;
+        jw.Options.WriteIndented = indented;
+
+        if (camelCase) jw.Options.PropertyNaming = PropertyNaming.CamelCase;
 
         jw.WriteValue(obj);
 
-        var json = jw._Builder.ToString();
-        //if (indented) json = JsonHelper.Format(json);
+        return jw._Builder.ToString();
+    }
 
-        return json;
+    /// <summary>对象序列化为Json字符串</summary>
+    /// <param name="obj"></param>
+    /// <param name="jsonOptions">序列化选项</param>
+    /// <returns></returns>
+    public static String ToJson(Object obj, JsonOptions jsonOptions)
+    {
+        var jw = new JsonWriter { Options = jsonOptions };
+
+        jw.WriteValue(obj);
+
+        return jw._Builder.ToString();
     }
     #endregion
 
@@ -104,7 +123,7 @@ public class JsonWriter
     /// <returns></returns>
     public String GetString() => _Builder.ToString();
 
-    private void WriteValue(Object obj)
+    private void WriteValue(Object? obj)
     {
         if (obj is null or DBNull)
             _Builder.Append("null");
@@ -113,7 +132,7 @@ public class JsonWriter
             WriteString(obj + "");
 
         else if (obj is Type type)
-            WriteString(type.FullName.TrimStart("System."));
+            WriteString(type.FullName?.TrimPrefix("System.") + "");
 
         else if (obj is Guid)
             WriteStringFast(obj + "");
@@ -121,7 +140,10 @@ public class JsonWriter
         else if (obj is Boolean)
             _Builder.Append((obj + "").ToLower());
 
-        else if ((obj is Int64 or UInt64) && Int64AsString)
+        else if ((obj is Int64 vInt64) && Options.Int64AsString && (vInt64 > 9007199254740991 || vInt64 < -9007199254740991))
+            WriteStringFast(obj + "");
+
+        else if ((obj is UInt64 vUInt64) && Options.Int64AsString && vUInt64 > 9007199254740991)
             WriteStringFast(obj + "");
 
         else if (
@@ -140,14 +162,20 @@ public class JsonWriter
             WriteDateTime(time);
 
         else if (obj is DateTimeOffset offset)
-            WriteDateTime(offset);
+            _Builder.AppendFormat("\"{0:O}\"", offset);
+#if NET6_0_OR_GREATER
+        else if (obj is DateOnly date)
+            _Builder.AppendFormat("\"{0:O}\"", date);
+        else if (obj is TimeOnly time2)
+            _Builder.AppendFormat("\"{0}\"", time2);
+#endif
 
-        else if (obj is IDictionary<String, Object> sdic)
+        else if (obj is IDictionary<String, Object?> sdic)
             WriteStringDictionary(sdic);
         else if (obj is IDictionary dictionary && obj.GetType().IsGenericType && obj.GetType().GetGenericArguments()[0].GetTypeCode() != TypeCode.Object)
             WriteStringDictionary(dictionary);
         else if (obj is ExpandoObject)
-            WriteStringDictionary((IDictionary<String, Object>)obj);
+            WriteStringDictionary((IDictionary<String, Object?>)obj);
         else if (obj is IDictionary dictionary1)
             WriteDictionary(dictionary1);
         else if (obj is Byte[] buf)
@@ -157,8 +185,8 @@ public class JsonWriter
             else
                 WriteStringFast(Convert.ToBase64String(buf, 0, buf.Length, Base64FormattingOptions.None));
         }
-        else if (obj is Packet pk)
-            WriteStringFast(ByteArrayAsHex ? pk.ToHex(-1) : pk.ToBase64());
+        else if (obj is IPacket pk)
+            WriteStringFast(ByteArrayAsHex ? pk.ToHex(-1) : pk.ToArray().ToBase64());
         else if (obj is StringDictionary dictionary2)
             WriteSD(dictionary2);
 
@@ -175,11 +203,15 @@ public class JsonWriter
 
         else if (obj is Enum)
         {
-            if (EnumString)
+            if (Options.EnumString)
                 WriteValue(obj + "");
             else
                 WriteValue(obj.ToLong());
         }
+
+        // 支持格式化的类型，有去有回
+        else if (obj is IFormattable)
+            WriteValue(obj + "");
 
         else
             WriteObject(obj);
@@ -192,9 +224,11 @@ public class JsonWriter
 
         var first = true;
 
-        foreach (String item in nvs)
+        foreach (var item in nvs)
         {
-            if (!IgnoreNullValues || !IsNull(nvs[item]))
+            if (item is not String key) continue;
+
+            if (!Options.IgnoreNullValues || !IsNull(nvs[key]))
             {
                 if (!first)
                 {
@@ -203,8 +237,8 @@ public class JsonWriter
                 }
                 first = false;
 
-                var name = FormatName(item);
-                WritePair(name, nvs[item]);
+                var name = FormatName(key);
+                WritePair(name, nvs[key]);
             }
         }
 
@@ -219,9 +253,11 @@ public class JsonWriter
 
         var first = true;
 
-        foreach (DictionaryEntry item in dic)
+        foreach (var item in dic)
         {
-            if (!IgnoreNullValues || !IsNull(item.Value))
+            if (item is not DictionaryEntry entry) continue;
+
+            if (!Options.IgnoreNullValues || !IsNull(entry.Value))
             {
                 if (!first)
                 {
@@ -230,8 +266,8 @@ public class JsonWriter
                 }
                 first = false;
 
-                var name = FormatName((String)item.Key);
-                WritePair(name, item.Value);
+                var name = FormatName((String)entry.Key);
+                WritePair(name, entry.Value);
             }
         }
 
@@ -239,42 +275,37 @@ public class JsonWriter
         _Builder.Append('}');
     }
 
-    private void WriteDateTime(DateTimeOffset dateTimeOffset)
-    {
-        //2022-11-29T14:13:17.8763881+08:00
-        var str = dateTimeOffset.ToString("O");
-        _Builder.AppendFormat("\"{0}\"", str);
-    }
-
     private void WriteDateTime(DateTime dateTime)
     {
         var dt = dateTime;
         if (UseUTCDateTime) dt = dateTime.ToUniversalTime();
 
-        // 纯日期缩短长度
+        // 纯日期缩短长度，使用 ISO 8601 格式
         var str = "";
-        if (dt.Year > 1000)
+        if (Options.FullTime)
+            str = dt.ToString("O");
+        else if (dt.Year > 1000)
         {
             //if (dt.Hour == 0 && dt.Minute == 0 && dt.Second == 0)
             //{
             //    str = dt.ToString("yyyy-MM-dd");
             //}
             //else
-            str = dt.ToFullString();
+            str = dt.ToString("yyyy-MM-ddTHH:mm:ss");
 
             // 处理UTC
-            if (dt.Kind == DateTimeKind.Utc) str += " UTC";
+            if (dt.Kind == DateTimeKind.Utc) str += "Z";
         }
 
         _Builder.AppendFormat("\"{0}\"", str);
     }
 
     Int32 _depth = 0;
-    private readonly ICollection<Object> _cirobj = new HashSet<Object>();
+    private readonly ICollection<Object> _cirobj = [];
     private void WriteObject(Object obj)
     {
         // 循环引用
-        if (IgnoreCircle && _cirobj.Contains(obj))
+        if (Options.IgnoreCycles && _cirobj.Contains(obj))
         {
             _Builder.Append("{}");
             return;
@@ -311,59 +342,51 @@ public class JsonWriter
         {
             if (IgnoreReadOnlyProperties && pi.CanRead && !pi.CanWrite) continue;
 
-            var value = obj.GetValue(pi);
-            if (!IgnoreNullValues || !IsNull(value))
+            var value = obj is IModel src ? src[pi.Name] : MemberAccessorTable.GetValue(obj, t, pi);
+            if (!Options.IgnoreNullValues || !IsNull(value))
             {
                 var name = FormatName(SerialHelper.GetName(pi));
-                String comment = null;
-                if (!IgnoreComment && Indented) comment = pi.GetDisplayName() ?? pi.GetDescription();
+                String? comment = null;
+                if (!IgnoreComment && Options.WriteIndented) comment = pi.GetDisplayName() ?? pi.GetDescription();
 
-                if (!hs.Contains(name))
-                {
-                    hs.Add(name);
-                    WriteMember(name, value, comment, ref first);
-                }
+                if (hs.Add(name)) WriteMember(name, value, comment, ref first);
             }
         }
 
         // 扩展数据
-        if (obj is IExtend3 ext3 && ext3.Items != null)
+        if (obj is IExtend ext3 && ext3.Items != null)
         {
             // 提前拷贝，避免遍历中改变集合
             var dic = ext3.Items.ToDictionary(e => e.Key, e => e.Value);
             foreach (var item in dic)
             {
                 var name = FormatName(item.Key);
-                if (!hs.Contains(name))
-                {
-                    hs.Add(name);
-                    WriteMember(name, item.Value, null, ref first);
-                }
+                if (hs.Add(name)) WriteMember(name, item.Value, null, ref first);
             }
         }
-        else if (obj is IExtend2 ext2 && ext2.Keys != null)
-        {
-            // 提前拷贝，避免遍历中改变集合
-            var keys = ext2.Keys.ToArray();
-            foreach (var item in keys)
-            {
-                var name = FormatName(item);
-                if (!hs.Contains(name))
-                {
-                    hs.Add(name);
-                    WriteMember(name, ext2[item], null, ref first);
-                }
-            }
-        }
+        //else if (obj is IExtend2 ext2 && ext2.Keys != null)
+        //{
+        //    // 提前拷贝，避免遍历中改变集合
+        //    var keys = ext2.Keys.ToArray();
+        //    foreach (var item in keys)
+        //    {
+        //        var name = FormatName(item);
+        //        if (!hs.Contains(name))
+        //        {
+        //            hs.Add(name);
+        //            WriteMember(name, ext2[item], null, ref first);
+        //        }
+        //    }
+        //}
 
         WriteRightIndent();
         _Builder.Append('}');
         _depth--;
     }
 
-    private void WriteMember(String name, Object value, String comment, ref Boolean first)
+    private void WriteMember(String name, Object? value, String? comment, ref Boolean first)
     {
-        if (!IgnoreNullValues || !IsNull(value))
+        if (!Options.IgnoreNullValues || !IsNull(value))
         {
             if (!first)
             {
@@ -372,13 +395,13 @@ public class JsonWriter
             }
             first = false;
 
-            // 注释
-            if (!IgnoreComment && Indented)
+            // 注释——使用 # 前缀键写入有效 JSON（JsonParser 解析时自动跳过）
+            if (!IgnoreComment && Options.WriteIndented)
             {
-                //var comment = pi.GetDisplayName() ?? pi.GetDescription();
                 if (!comment.IsNullOrEmpty())
                 {
-                    _Builder.AppendFormat("// {0}", comment);
+                    WritePair("#" + name, comment);
+                    _Builder.Append(',');
                     WriteIndent();
                 }
             }
@@ -389,21 +412,12 @@ public class JsonWriter
     #endregion
 
     #region 辅助
-    private void WritePairFast(String name, String value)
+    private void WritePair(String name, Object? value)
     {
-        WriteStringFast(name);
+        WriteString(name);
 
         _Builder.Append(':');
-
-        WriteStringFast(value);
-    }
-
-    private void WritePair(String name, Object value)
-    {
-        WriteStringFast(name);
-
-        _Builder.Append(':');
-        if (Indented) _Builder.Append(' ');
+        if (Options.WriteIndented) _Builder.Append(' ');
 
         WriteValue(value);
     }
@@ -416,6 +430,7 @@ public class JsonWriter
         var first = true;
         foreach (var obj in arr)
         {
+            // JSON 标准要求数组保留 null 元素（null 是合法 JSON 值），IgnoreNullValues 仅适用于对象属性
             if (first)
                 WriteLeftIndent();
             else
@@ -438,9 +453,11 @@ public class JsonWriter
         WriteLeftIndent();
 
         var first = true;
-        foreach (DictionaryEntry item in dic)
+        foreach (var item in dic)
         {
-            if (!IgnoreNullValues || !IsNull(item.Value))
+            if (item is not DictionaryEntry entry) continue;
+
+            if (!Options.IgnoreNullValues || !IsNull(entry.Value))
             {
                 if (!first)
                 {
@@ -449,8 +466,8 @@ public class JsonWriter
                 }
                 first = false;
 
-                var name = FormatName(item.Key + "");
-                WritePair(name, item.Value);
+                var name = FormatName(entry.Key + "");
+                WritePair(name, entry.Value);
             }
         }
 
@@ -458,7 +475,7 @@ public class JsonWriter
         _Builder.Append('}');
     }
 
-    private void WriteStringDictionary(IDictionary<String, Object> dic)
+    private void WriteStringDictionary(IDictionary<String, Object?> dic)
     {
         _Builder.Append('{');
         WriteLeftIndent();
@@ -469,7 +486,7 @@ public class JsonWriter
             // 跳过注释
             if (item.Key[0] == '#') continue;
 
-            if (!IgnoreNullValues || !IsNull(item.Value))
+            if (!Options.IgnoreNullValues || !IsNull(item.Value))
             {
                 if (!first)
                 {
@@ -481,7 +498,7 @@ public class JsonWriter
                 var name = FormatName(item.Key);
 
                 // 注释
-                if (!IgnoreComment && Indented && dic.TryGetValue("#" + name, out var comment) && comment != null)
+                if (!IgnoreComment && Options.WriteIndented && dic.TryGetValue("#" + name, out var comment) && comment != null)
                 {
                     WritePair("#" + name, comment);
                     _Builder.Append(',');
@@ -503,9 +520,11 @@ public class JsonWriter
         WriteLeftIndent();
 
         var first = true;
-        foreach (DictionaryEntry entry in dic)
+        foreach (var item in dic)
         {
-            if (!IgnoreNullValues || !IsNull(entry.Value))
+            if (item is not DictionaryEntry entry) continue;
+
+            if (!Options.IgnoreNullValues || !IsNull(entry.Value))
             {
                 if (!first)
                 {
@@ -546,10 +565,10 @@ public class JsonWriter
         {
             var c = str[index];
 
-            if (c is not '\t' and not '\n' and not '\r' and not '\"' and not '\\')// && c != ':' && c!=',')
+            // 需要转义的字符
+            if (c is not '\t' and not '\n' and not '\r' and not '\"' and not '\\' and >= ' ' and <= '~')
             {
                 if (idx == -1) idx = index;
-
                 continue;
             }
 
@@ -561,14 +580,19 @@ public class JsonWriter
 
             switch (c)
             {
+                case '\b': _Builder.Append("\\b"); break;
                 case '\t': _Builder.Append("\\t"); break;
                 case '\r': _Builder.Append("\\r"); break;
                 case '\n': _Builder.Append("\\n"); break;
+                case '\f': _Builder.Append("\\f"); break;
                 case '"':
                 case '\\': _Builder.Append('\\'); _Builder.Append(c); break;
                 default:
-                    _Builder.Append(c);
-
+                    // 非可见字符或需要转义的Unicode字符
+                    if (c is < (Char)32 /*or > (Char)126*/)
+                        _Builder.AppendFormat("\\u{0:X4}", (Int32)c);
+                    else
+                        _Builder.Append(c);
                     break;
             }
         }
@@ -586,17 +610,83 @@ public class JsonWriter
         if (name.IsNullOrEmpty()) return name;
 
         if (LowerCase) return name.ToLower();
-        if (CamelCase)
-        {
-            if (name == "ID") return "id";
-            return name[..1].ToLower() + name[1..];
-        }
 
-        return name;
+        return Options.PropertyNaming switch
+        {
+            PropertyNaming.CamelCase => ConvertCamelCase(name),
+            PropertyNaming.KebabCaseLower => ConvertKebabCaseLower(name),
+            PropertyNaming.KebabCaseUpper => ConvertKebabCaseUpper(name),
+            PropertyNaming.SnakeCaseLower => ConvertSnakeCaseLower(name),
+            PropertyNaming.SnakeCaseUpper => ConvertSnakeCaseUpper(name),
+            _ => name,
+        };
     }
 
-    private static IDictionary<TypeCode, Object> _def;
-    private static Boolean IsNull(Object obj)
+    /// <summary>将属性名转换为驼峰命名</summary>
+    private static String ConvertCamelCase(String name)
+    {
+        if (name == "ID") return "id";
+        return name[..1].ToLower() + name[1..];
+    }
+
+    /// <summary>将属性名转换为小写 kebab 命名</summary>
+    private static String ConvertKebabCaseLower(String name)
+    {
+        var sb = Pool.StringBuilder.Get();
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && Char.IsUpper(c))
+                sb.Append('-');
+            sb.Append(Char.ToLower(c));
+        }
+        return sb.Return(true);
+    }
+
+    /// <summary>将属性名转换为大写 kebab 命名</summary>
+    private static String ConvertKebabCaseUpper(String name)
+    {
+        var sb = Pool.StringBuilder.Get();
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && Char.IsUpper(c))
+                sb.Append('-');
+            sb.Append(Char.ToUpper(c));
+        }
+        return sb.Return(true);
+    }
+
+    /// <summary>将属性名转换为小写 snake 命名</summary>
+    private static String ConvertSnakeCaseLower(String name)
+    {
+        var sb = Pool.StringBuilder.Get();
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && Char.IsUpper(c))
+                sb.Append('_');
+            sb.Append(Char.ToLower(c));
+        }
+        return sb.Return(true);
+    }
+
+    /// <summary>将属性名转换为大写 snake 命名</summary>
+    private static String ConvertSnakeCaseUpper(String name)
+    {
+        var sb = Pool.StringBuilder.Get();
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && Char.IsUpper(c))
+                sb.Append('_');
+            sb.Append(Char.ToUpper(c));
+        }
+        return sb.Return(true);
+    }
+
+    private static IDictionary<TypeCode, Object>? _def;
+    private static Boolean IsNull(Object? obj)
     {
         if (obj is null or DBNull) return true;
 
@@ -639,7 +729,7 @@ public class JsonWriter
 
     private void WriteIndent()
     {
-        if (!Indented) return;
+        if (!Options.WriteIndented) return;
 
         _Builder.AppendLine();
         _Builder.Append(' ', _level * IndentedLength);
@@ -647,7 +737,7 @@ public class JsonWriter
 
     private void WriteLeftIndent()
     {
-        if (!Indented) return;
+        if (!Options.WriteIndented) return;
 
         _Builder.AppendLine();
         _Builder.Append(' ', ++_level * IndentedLength);
@@ -655,7 +745,7 @@ public class JsonWriter
 
     private void WriteRightIndent()
     {
-        if (!Indented) return;
+        if (!Options.WriteIndented) return;
 
         _Builder.AppendLine();
         _Builder.Append(' ', --_level * IndentedLength);

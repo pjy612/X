@@ -13,53 +13,53 @@ public abstract class Logger : ILog
     #region 主方法
     /// <summary>调试日志</summary>
     /// <param name="format">格式化字符串</param>
-    /// <param name="args">格式化参数</param>
-    public virtual void Debug(String format, params Object[] args) => Write(LogLevel.Debug, format, args);
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Debug(String format, params Object?[] args) => Write(LogLevel.Debug, format, args);
 
     /// <summary>信息日志</summary>
     /// <param name="format">格式化字符串</param>
-    /// <param name="args">格式化参数</param>
-    public virtual void Info(String format, params Object[] args) => Write(LogLevel.Info, format, args);
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Info(String format, params Object?[] args) => Write(LogLevel.Info, format, args);
 
     /// <summary>警告日志</summary>
     /// <param name="format">格式化字符串</param>
-    /// <param name="args">格式化参数</param>
-    public virtual void Warn(String format, params Object[] args) => Write(LogLevel.Warn, format, args);
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Warn(String format, params Object?[] args) => Write(LogLevel.Warn, format, args);
 
     /// <summary>错误日志</summary>
     /// <param name="format">格式化字符串</param>
-    /// <param name="args">格式化参数</param>
-    public virtual void Error(String format, params Object[] args) => Write(LogLevel.Error, format, args);
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Error(String format, params Object?[] args) => Write(LogLevel.Error, format, args);
 
     /// <summary>严重错误日志</summary>
     /// <param name="format">格式化字符串</param>
-    /// <param name="args">格式化参数</param>
-    public virtual void Fatal(String format, params Object[] args) => Write(LogLevel.Fatal, format, args);
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Fatal(String format, params Object?[] args) => Write(LogLevel.Fatal, format, args);
     #endregion
 
     #region 核心方法
     /// <summary>写日志</summary>
-    /// <param name="level"></param>
-    /// <param name="format"></param>
-    /// <param name="args"></param>
-    public virtual void Write(LogLevel level, String format, params Object[] args)
+    /// <param name="level">日志级别</param>
+    /// <param name="format">格式化字符串</param>
+    /// <param name="args">格式化参数数组</param>
+    public virtual void Write(LogLevel level, String format, params Object?[] args)
     {
         if (Enable && level >= Level) OnWrite(level, format, args);
     }
 
-    /// <summary>写日志</summary>
-    /// <param name="level"></param>
-    /// <param name="format"></param>
-    /// <param name="args"></param>
-    protected abstract void OnWrite(LogLevel level, String format, params Object[] args);
+    /// <summary>写日志。由派生类实现具体的日志输出</summary>
+    /// <param name="level">日志级别</param>
+    /// <param name="format">格式化字符串</param>
+    /// <param name="args">格式化参数数组</param>
+    protected abstract void OnWrite(LogLevel level, String format, params Object?[] args);
     #endregion
 
     #region 辅助方法
     /// <summary>格式化参数，特殊处理异常和时间</summary>
-    /// <param name="format"></param>
-    /// <param name="args"></param>
-    /// <returns></returns>
-    protected virtual String Format(String format, Object[] args)
+    /// <param name="format">格式化字符串</param>
+    /// <param name="args">格式化参数数组</param>
+    /// <returns>格式化后的字符串</returns>
+    internal protected virtual String Format(String format, Object?[]? args)
     {
         //处理时间的格式化
         if (args != null && args.Length > 0)
@@ -70,10 +70,10 @@ public abstract class Logger : ILog
 
             for (var i = 0; i < args.Length; i++)
             {
-                if (args[i] != null && args[i].GetType() == typeof(DateTime))
+                if (args[i] != null && args[i] is DateTime dt && format.Contains("{" + i + "}"))
                 {
                     // 根据时间值的精确度选择不同的格式化输出
-                    var dt = (DateTime)args[i];
+                    //var dt = (DateTime)args[i];
                     if (dt.Millisecond > 0)
                         args[i] = dt.ToString("yyyy-MM-dd HH:mm:ss.fff");
                     else if (dt.Hour > 0 || dt.Minute > 0 || dt.Second > 0)
@@ -83,11 +83,24 @@ public abstract class Logger : ILog
                 }
             }
         }
-        if (args == null || args.Length <= 0) return format;
+        if (args == null || args.Length <= 0) return Localization.TranslateForLog(format);
 
         //format = format.Replace("{", "{{").Replace("}", "}}");
 
-        return String.Format(format, args);
+        return Localization.TranslateForLog(format, args);
+    }
+
+    /// <summary>格式化日志消息（翻译 + 参数处理），供带前缀的日志封装复用</summary>
+    /// <param name="log">目标日志器，可为空</param>
+    /// <param name="format">格式化字符串</param>
+    /// <param name="args">格式化参数数组</param>
+    /// <returns>已翻译并格式化的消息</returns>
+    /// <remarks>内置日志器走 <see cref="Format"/> 以保留时间/异常特殊处理；其它实现走 <see cref="Localization.TranslateForLog(String, Object?[])"/>。</remarks>
+    public static String FormatMessage(ILog? log, String format, Object?[]? args)
+    {
+        if (log is Logger logger) return logger.Format(format, args);
+
+        return Localization.TranslateForLog(format, args);
     }
     #endregion
 
@@ -117,7 +130,7 @@ public abstract class Logger : ILog
     {
         public override Boolean Enable { get => false; set { } }
 
-        protected override void OnWrite(LogLevel level, String format, params Object[] args) { }
+        protected override void OnWrite(LogLevel level, String format, params Object?[] args) { }
     }
     #endregion
 
@@ -174,7 +187,7 @@ public abstract class Logger : ILog
         // MonoAndroid无法识别MainModule，致命异常
         try
         {
-            fileName = process.MainModule.FileName;
+            fileName = process.MainModule?.FileName;
         }
         catch { }
         if (fileName.IsNullOrEmpty() || fileName.EndsWithIgnoreCase("dotnet", "dotnet.exe"))
@@ -245,7 +258,7 @@ public abstract class Logger : ILog
         {
             sb.AppendFormat("#Memory: {0:n0}M/{1:n0}M\r\n", mi.AvailableMemory / 1024 / 1024, mi.Memory / 1024 / 1024);
             sb.AppendFormat("#Processor: {0}\r\n", mi.Processor);
-            if (!mi.Product.IsNullOrEmpty()) sb.AppendFormat("#Product: {0}\r\n", mi.Product);
+            if (!mi.Product.IsNullOrEmpty()) sb.AppendFormat("#Product: {0} / {1}\r\n", mi.Product, mi.Vendor);
             if (mi.Temperature > 0) sb.AppendFormat("#Temperature: {0}\r\n", mi.Temperature);
         }
         sb.AppendFormat("#GC: IsServerGC={0}, LatencyMode={1}\r\n", GCSettings.IsServerGC, GCSettings.LatencyMode);
@@ -255,11 +268,15 @@ public abstract class Logger : ILog
         ThreadPool.GetAvailableThreads(out var avaWorker, out var avaIO);
         sb.AppendFormat("#ThreadPool: Min={0}/{1}, Max={2}/{3}, Available={4}/{5}\r\n", minWorker, minIO, maxWorker, maxIO, avaWorker, avaIO);
 
+        var set = Setting.Current;
         sb.AppendFormat("#SystemStarted: {0}\r\n", TimeSpan.FromMilliseconds(Runtime.TickCount64));
         sb.AppendFormat("#Date: {0:yyyy-MM-dd}\r\n", DateTime.Now);
-        sb.AppendFormat("#详解：{0}\r\n", "https://newlifex.com/core/log");
-        sb.AppendFormat("#字段: 时间 线程ID 线程池Y/网页W/普通N/定时T 线程名/任务ID 消息内容\r\n");
-        sb.AppendFormat("#Fields: Time ThreadID Kind Name Message\r\n");
+        sb.AppendFormat("#Docs: {0}\r\n", "https://newlifex.com/core/log");
+        //sb.AppendFormat("#Fields: Time ThreadID Kind Name Message\r\n");
+
+        var format = set.LogLineFormat;
+        if (format.IsNullOrEmpty()) format = "Time|ThreadId|Kind|Name|Message";
+        sb.AppendFormat("#Fields: {0}\r\n", format.Replace('|', ' '));
 
         return sb.ToString();
     }

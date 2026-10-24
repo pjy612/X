@@ -1,4 +1,5 @@
 ﻿using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using NewLife.Log;
 using NewLife.Reflection;
 
@@ -7,8 +8,10 @@ namespace NewLife.Extension;
 class SpeakProvider
 {
     private static readonly String typeName = "System.Speech.Synthesis.SpeechSynthesizer";
-    private Type _type;
+    private Type? _type;
 
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "语音合成经类型名字符串动态加载；AOT 下不受支持")]
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "语音合成经类型名字符串动态加载；AOT 下不受支持")]
     public SpeakProvider()
     {
         try
@@ -17,7 +20,21 @@ class SpeakProvider
             _type = Type.GetType(typeName);
             if (_type == null)
             {
-                var asm = Assembly.Load("System.Speech");
+                Assembly? asm = null;
+                try
+                {
+                    // 新版系统内置
+                    if (Environment.OSVersion.Version.Major >= 6)
+                    {
+                        asm ??= Assembly.Load("System.Speech, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35");
+                    }
+                }
+                catch { }
+                try
+                {
+                    asm ??= Assembly.Load("System.Speech");
+                }
+                catch { }
                 _type = asm?.GetType(typeName);
             }
         }
@@ -26,18 +43,18 @@ class SpeakProvider
             XTrace.WriteException(ex);
         }
 
-        if (_type == null) XTrace.WriteLine("找不到语音库System.Speech，需要从nuget引用");
+        if (_type == null) XTrace.WriteLine("The System.Speech speech library was not found; reference it from NuGet.");
     }
 
-    private Object synth;
+    private Object? synth;
     void EnsureSynth()
     {
-        if (synth == null)
+        if (synth == null && _type != null)
         {
             try
             {
-                synth = _type.CreateInstance(new Object[0]);
-                synth.Invoke("SetOutputToDefaultAudioDevice", new Object[0]);
+                synth = _type.CreateInstance([]);
+                synth?.Invoke("SetOutputToDefaultAudioDevice", []);
             }
             catch (Exception ex)
             {

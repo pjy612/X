@@ -1,144 +1,144 @@
-﻿using System;
+﻿using NewLife;
 using NewLife.Security;
 using NewLife.Web;
 using Xunit;
 
-namespace XUnitTest.Web
+namespace XUnitTest.Web;
+
+public class JwtBuilderTests
 {
-    public class JwtBuilderTests
+    static JwtBuilderTests()
     {
-        static JwtBuilderTests()
+        JwtBuilder.RegisterAlgorithm("ES256", ECDsaHelper.SignSha256, ECDsaHelper.VerifySha256);
+        JwtBuilder.RegisterAlgorithm("ES384", ECDsaHelper.SignSha384, ECDsaHelper.VerifySha384);
+        JwtBuilder.RegisterAlgorithm("ES512", ECDsaHelper.SignSha512, ECDsaHelper.VerifySha512);
+    }
+
+    [Fact]
+    public void HS256_Encode()
+    {
+        var builder = new JwtBuilder
         {
-            JwtBuilder.RegisterAlgorithm("ES256", ECDsaHelper.SignSha256, ECDsaHelper.VerifySha256);
-            JwtBuilder.RegisterAlgorithm("ES384", ECDsaHelper.SignSha384, ECDsaHelper.VerifySha384);
-            JwtBuilder.RegisterAlgorithm("ES512", ECDsaHelper.SignSha512, ECDsaHelper.VerifySha512);
-        }
+            //Id = null,
+            //Subject = "Cube",
+            //Issuer = "NewLife",
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = "Smart",
+        };
 
-        [Fact]
-        public void HS256_Encode()
+        var token = builder.Encode(new { sub = "0201", name = "stone" });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJIUzI1NiJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIwMjAxIiwibmFtZSI6InN0b25lIiwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        Assert.Equal("mY2_rvQORkyYpK3f84liG2EDpaYY7pO43sRgcli381U", ts[2]);
+
+        var builder2 = new JwtBuilder
         {
-            var builder = new JwtBuilder
-            {
-                //Id = null,
-                //Subject = "Cube",
-                //Issuer = "NewLife",
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = "Smart",
-            };
+            Secret = builder.Secret,
+        };
 
-            var token = builder.Encode(new { sub = "0201", name = "stone" });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
+        ts = builder2.Parse(token);
+        Assert.NotNull(ts);
+        Assert.Equal(3, ts.Length);
 
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJIUzI1NiJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIwMjAxIiwibmFtZSI6InN0b25lIiwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            Assert.Equal("mY2_rvQORkyYpK3f84liG2EDpaYY7pO43sRgcli381U", ts[2]);
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
 
-            var builder2 = new JwtBuilder
-            {
-                Secret = builder.Secret,
-            };
+        Assert.Null(builder2.Type);
+        Assert.Equal("0201", builder2.Subject);
+        Assert.Equal("stone", builder2["name"]);
+    }
 
-            ts = builder2.Parse(token);
-            Assert.NotNull(ts);
-            Assert.Equal(3, ts.Length);
-
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Null(builder2.Type);
-            Assert.Equal("0201", builder2.Subject);
-            Assert.Equal("stone", builder2["name"]);
-        }
-
-        [Fact]
-        public void HS256_Encode2()
+    [Fact]
+    public void HS256_Encode2()
+    {
+        var builder = new JwtBuilder
         {
-            var builder = new JwtBuilder
-            {
-                Id = Guid.NewGuid() + "",
-                Subject = "Cube",
-                Issuer = "NewLife",
-                IssuedAt = DateTime.Now,
-                Audience = "all",
-                NotBefore = DateTime.Today,
-                //Expire = TimeSpan.FromHours(0),
-                Secret = "Smart",
-            };
+            Id = Guid.NewGuid() + "",
+            Subject = "Cube",
+            Issuer = "NewLife",
+            IssuedAt = DateTime.Now,
+            Audience = "all",
+            NotBefore = DateTime.Today,
+            //Expire = TimeSpan.FromHours(0),
+            Secret = "Smart",
+        };
 
-            var token = builder.Encode(new { sub = "0201", name = "stone" });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
+        var token = builder.Encode(new { sub = "0201", name = "stone" });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
 
-            // 有效期默认2小时
-            Assert.True(builder.Expire.Year > 2000);
-            var ts = builder.Expire - DateTime.Now;
-            Assert.True(ts <= TimeSpan.FromHours(2));
-            Assert.True(ts > TimeSpan.FromMinutes(2 * 60 - 1));
+        // 有效期默认2小时
+        Assert.True(builder.Expire.Year > 2000);
+        var ts = builder.Expire - DateTime.Now;
+        Assert.True(ts <= TimeSpan.FromHours(2));
+        Assert.True(ts > TimeSpan.FromMinutes(2 * 60 - 1));
 
-            var builder2 = new JwtBuilder
-            {
-                Secret = builder.Secret,
-            };
-
-            var rs = builder2.TryDecode(token, out var payload);
-            Assert.True(rs);
-            Assert.NotEqual(builder.Subject, builder2.Subject);
-            Assert.Equal("0201", builder2.Subject);
-            Assert.Null(builder2.Type);
-            Assert.Equal(builder.Expire.Trim(), builder2.Expire.Trim());
-
-            Assert.Equal(builder.Id, builder2.Id);
-            Assert.Equal(builder.Issuer, builder2.Issuer);
-            Assert.Equal(builder.IssuedAt.Trim(), builder2.IssuedAt.Trim());
-            Assert.Equal(builder.Audience, builder2.Audience);
-            Assert.Equal(builder.NotBefore, builder2.NotBefore);
-            Assert.Equal("stone", builder2["name"]);
-        }
-
-        [Fact]
-        public void AlgorithmTest()
+        var builder2 = new JwtBuilder
         {
-            var builder = new JwtBuilder
-            {
-                Id = null,
-                Subject = "Cube",
-                Issuer = "NewLife",
-                IssuedAt = DateTime.Now,
-                //Expire = TimeSpan.FromHours(0),
-                Type = "JWT",
-                Algorithm = "HS512",
-                Secret = "Smart",
-            };
+            Secret = builder.Secret,
+        };
 
-            var token = builder.Encode(new { sub = "0201", name = "stone" });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
+        var rs = builder2.TryDecode(token, out var payload);
+        Assert.True(rs);
+        Assert.NotEqual(builder.Subject, builder2.Subject);
+        Assert.Equal("0201", builder2.Subject);
+        Assert.Null(builder2.Type);
+        Assert.Equal(builder.Expire.Trim(), builder2.Expire.Trim());
 
-            var builder2 = new JwtBuilder
-            {
-                Secret = builder.Secret,
-            };
+        Assert.Equal(builder.Id, builder2.Id);
+        Assert.Equal(builder.Issuer, builder2.Issuer);
+        Assert.Equal(builder.IssuedAt.Trim(), builder2.IssuedAt.Trim());
+        Assert.Equal(builder.Audience, builder2.Audience);
+        Assert.Equal(builder.NotBefore, builder2.NotBefore);
+        Assert.Equal("stone", builder2["name"]);
+    }
 
-            var rs = builder2.TryDecode(token, out var payload);
-            Assert.True(rs);
-            Assert.NotEqual(builder.Subject, builder2.Subject);
-            Assert.Equal("0201", builder2.Subject);
-            Assert.Equal("JWT", builder2.Type);
-
-            Assert.Equal(builder.Issuer, builder2.Issuer);
-            Assert.Equal(builder.IssuedAt.Trim(), builder2.IssuedAt.Trim());
-            Assert.Equal("stone", builder2["name"]);
-        }
-
-        [Fact]
-        public void RS256()
+    [Fact]
+    public void AlgorithmTest()
+    {
+        var builder = new JwtBuilder
         {
-            var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
+            Id = null,
+            Subject = "Cube",
+            Issuer = "NewLife",
+            IssuedAt = DateTime.Now,
+            //Expire = TimeSpan.FromHours(0),
+            Type = "JWT",
+            Algorithm = "HS512",
+            Secret = "Smart",
+        };
+
+        var token = builder.Encode(new { sub = "0201", name = "stone" });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var builder2 = new JwtBuilder
+        {
+            Secret = builder.Secret,
+        };
+
+        var rs = builder2.TryDecode(token, out var payload);
+        Assert.True(rs);
+        Assert.NotEqual(builder.Subject, builder2.Subject);
+        Assert.Equal("0201", builder2.Subject);
+        Assert.Equal("JWT", builder2.Type);
+
+        Assert.Equal(builder.Issuer, builder2.Issuer);
+        Assert.Equal(builder.IssuedAt.Trim(), builder2.IssuedAt.Trim());
+        Assert.Equal("stone", builder2["name"]);
+    }
+
+    [Fact]
+    public void RS256()
+    {
+        var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAnzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA+kzeVOVpVWw
 kWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr/Mr
 m/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEi
@@ -165,7 +165,7 @@ NvVi5vcba9oGdElJX3e9mxqUKMrw7msJJv1MX8LWyMQC5L6YNYHDfbPF1q5L4i8j
 y18Ae9n7dHVueyslrb6weq7dTkYDi3iOYRW8HRkIQh06wEdbxt0shTzAJvvCQfrB
 jg/3747WSsf/zBTcHihTRBdAv6OmdhV4/dD5YBfLAkLrd+mX7iE=
 -----END RSA PRIVATE KEY-----";
-            var pubKey = @"-----BEGIN PUBLIC KEY-----
+        var pubKey = @"-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv
 vkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc
 aT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy
@@ -175,46 +175,46 @@ V6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9
 MwIDAQAB
 -----END PUBLIC KEY-----";
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "RS256",
-                Type = "JWT",
-
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
-
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
-
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            Assert.Equal("N4Ca2l1ucFoLtVLyU2dC4PKOW7wkEnjUXYb129_Jh8DFD9EGHIe70cSgy5ZYA6PvhZ3XT5PADpjy7-uwXCFfgww3_ChfPye2GJLy_cDOz7XcoJ-kFy_-83AUb73AjDLrMQ5M1_5WRVHl_Nw2E52b5cKuczwU3kdSVF3wEwgS3ku8xPz4iN6eOpfUOh5cjei0S4uwLLPYCf56KY7zbXlf5PXDpX5iQ098PAzvDJRf7jv21GEwaKRRdY8V8wpnPV6lDVp92qR8E2lGMA082WQWZf0RBDloG7EauulMPXiM43FE7DXBKSdbkXyFmky-xjWkCnLxSjKpVHpRS41vdFZgtA", ts[2]);
-
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "RS256",
-
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
-        }
-
-        [Fact]
-        public void RS384()
+        var builder = new JwtBuilder
         {
-            var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
+            Algorithm = "RS256",
+            Type = "JWT",
+
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
+
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        Assert.Equal("N4Ca2l1ucFoLtVLyU2dC4PKOW7wkEnjUXYb129_Jh8DFD9EGHIe70cSgy5ZYA6PvhZ3XT5PADpjy7-uwXCFfgww3_ChfPye2GJLy_cDOz7XcoJ-kFy_-83AUb73AjDLrMQ5M1_5WRVHl_Nw2E52b5cKuczwU3kdSVF3wEwgS3ku8xPz4iN6eOpfUOh5cjei0S4uwLLPYCf56KY7zbXlf5PXDpX5iQ098PAzvDJRf7jv21GEwaKRRdY8V8wpnPV6lDVp92qR8E2lGMA082WQWZf0RBDloG7EauulMPXiM43FE7DXBKSdbkXyFmky-xjWkCnLxSjKpVHpRS41vdFZgtA", ts[2]);
+
+        var builder2 = new JwtBuilder
+        {
+            Algorithm = "RS256",
+
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
+
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+
+    [Fact]
+    public void RS384()
+    {
+        var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAnzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA+kzeVOVpVWw
 kWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr/Mr
 m/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEi
@@ -241,7 +241,7 @@ NvVi5vcba9oGdElJX3e9mxqUKMrw7msJJv1MX8LWyMQC5L6YNYHDfbPF1q5L4i8j
 y18Ae9n7dHVueyslrb6weq7dTkYDi3iOYRW8HRkIQh06wEdbxt0shTzAJvvCQfrB
 jg/3747WSsf/zBTcHihTRBdAv6OmdhV4/dD5YBfLAkLrd+mX7iE=
 -----END RSA PRIVATE KEY-----";
-            var pubKey = @"-----BEGIN PUBLIC KEY-----
+        var pubKey = @"-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv
 vkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc
 aT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy
@@ -251,46 +251,46 @@ V6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9
 MwIDAQAB
 -----END PUBLIC KEY-----";
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "RS384",
-                Type = "JWT",
-
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
-
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
-
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJSUzM4NCIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            Assert.Equal("g3j77PXjYeroUclchX5SSCyyv1HjEuJRsRf8UhovRIInn1JVwmemofWJTtIt9AOlymBZdA8k6zpjdDV_AfV7uxkUmCM4vIQarBPviZZY4yp-4PCqfsAIfPeTPkRHHJmcmDNyvVHFzNqNLsrzzSvSG7O3MeKYKbjqHb5rCu38AF0gqwvGh08WyY91rVwV22ipJN16DLyp2nk8SC0lqvGKyypsUwf70XxXo_6wvekSb9Vbh6c57_513BkjFR5fVjcpqOfaIB9Lkj_tKH1ze7hWU6_xfAyYYQ3jPFCivBtRVFFjB5PrKHku3Z0DhFsDiM6zOIAoHgwII-ry0wwxYd7LUg", ts[2]);
-
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "RS384",
-
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
-        }
-
-        [Fact]
-        public void RS512()
+        var builder = new JwtBuilder
         {
-            var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
+            Algorithm = "RS384",
+            Type = "JWT",
+
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
+
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJSUzM4NCIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        Assert.Equal("g3j77PXjYeroUclchX5SSCyyv1HjEuJRsRf8UhovRIInn1JVwmemofWJTtIt9AOlymBZdA8k6zpjdDV_AfV7uxkUmCM4vIQarBPviZZY4yp-4PCqfsAIfPeTPkRHHJmcmDNyvVHFzNqNLsrzzSvSG7O3MeKYKbjqHb5rCu38AF0gqwvGh08WyY91rVwV22ipJN16DLyp2nk8SC0lqvGKyypsUwf70XxXo_6wvekSb9Vbh6c57_513BkjFR5fVjcpqOfaIB9Lkj_tKH1ze7hWU6_xfAyYYQ3jPFCivBtRVFFjB5PrKHku3Z0DhFsDiM6zOIAoHgwII-ry0wwxYd7LUg", ts[2]);
+
+        var builder2 = new JwtBuilder
+        {
+            Algorithm = "RS384",
+
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
+
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+
+    [Fact]
+    public void RS512()
+    {
+        var prvKey = @"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAnzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA+kzeVOVpVWw
 kWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr/Mr
 m/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEi
@@ -317,7 +317,7 @@ NvVi5vcba9oGdElJX3e9mxqUKMrw7msJJv1MX8LWyMQC5L6YNYHDfbPF1q5L4i8j
 y18Ae9n7dHVueyslrb6weq7dTkYDi3iOYRW8HRkIQh06wEdbxt0shTzAJvvCQfrB
 jg/3747WSsf/zBTcHihTRBdAv6OmdhV4/dD5YBfLAkLrd+mX7iE=
 -----END RSA PRIVATE KEY-----";
-            var pubKey = @"-----BEGIN PUBLIC KEY-----
+        var pubKey = @"-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv
 vkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc
 aT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy
@@ -327,180 +327,345 @@ V6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9
 MwIDAQAB
 -----END PUBLIC KEY-----";
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "RS512",
-                Type = "JWT",
-
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
-
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
-
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            Assert.Equal("dCReA3hZnLnvXKIK7zqDp2Ej5by_ePnRNCrRwz83Gz92YZeeKkaTPY-orOmWskJO3L1Lh2F4Sv8H3KR6p0KI35LQ2qdF3xnPchHI3p6oDJYSBnNb0vCSVG5sYKoCWEjC932BbNmohiaa62YNFla6XPt6_d2pDoqg-D-Q5Jfrj_-1mMGZxj4lOyILkaKyohM_C1OiFN8hlHKihOBXS1ER27btQcggueAUWZPBa1fzRqCU10r9yQLmnJm9K3F9HPLCTy4xgdc5vpI8wLZ1ylHjkHMAYaJyBFrX9T70iaruiG3tW3VXzv4ptGcnd3oUd__V9m_DHrfNFYh1Gy0a8JeeLQ", ts[2]);
-
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "RS512",
-
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
-        }
-
-        [Fact]
-        public void ES256()
+        var builder = new JwtBuilder
         {
-            var prvKey = @"-----BEGIN PRIVATE KEY-----
+            Algorithm = "RS512",
+            Type = "JWT",
+
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
+
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        Assert.Equal("dCReA3hZnLnvXKIK7zqDp2Ej5by_ePnRNCrRwz83Gz92YZeeKkaTPY-orOmWskJO3L1Lh2F4Sv8H3KR6p0KI35LQ2qdF3xnPchHI3p6oDJYSBnNb0vCSVG5sYKoCWEjC932BbNmohiaa62YNFla6XPt6_d2pDoqg-D-Q5Jfrj_-1mMGZxj4lOyILkaKyohM_C1OiFN8hlHKihOBXS1ER27btQcggueAUWZPBa1fzRqCU10r9yQLmnJm9K3F9HPLCTy4xgdc5vpI8wLZ1ylHjkHMAYaJyBFrX9T70iaruiG3tW3VXzv4ptGcnd3oUd__V9m_DHrfNFYh1Gy0a8JeeLQ", ts[2]);
+
+        var builder2 = new JwtBuilder
+        {
+            Algorithm = "RS512",
+
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
+
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+
+#if NETCOREAPP
+    [Fact]
+    public void ES256()
+    {
+        var prvKey = @"-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgevZzL1gdAFr88hb2
 OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r
 1RTwjmYSi9R/zpBnuQ4EiMnCqfMPWiZqB4QdbAd0E7oH50VpuZ1P087G
 -----END PRIVATE KEY-----";
-            var pubKey = @"-----BEGIN PUBLIC KEY-----
+        var pubKey = @"-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEVs/o5+uQbTjL3chynL4wXgUg2R9
 q9UU8I5mEovUf86QZ7kOBIjJwqnzD1omageEHWwHdBO6B+dFabmdT9POxg==
 -----END PUBLIC KEY-----";
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "ES256",
-                Type = "JWT",
-
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
-
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
-
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
-
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "ES256",
-
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
-        }
-
-        [Fact]
-        public void ES384()
+        var builder = new JwtBuilder
         {
-            var prvKey = @"RUNTMiAAAAAoECDSEE7PqKvRx+FXWXhpTXIm/ZquCKDa6UXA9+PMQRugM35vcgKAXR2pelQ2SqYjOFktBMm84x194VyepthORPQDRkEIcGIonNbCtCg+Y62sV9prPsXACNS//2huX38=";
-            var pubKey = @"RUNTMSAAAAAoECDSEE7PqKvRx+FXWXhpTXIm/ZquCKDa6UXA9+PMQRugM35vcgKAXR2pelQ2SqYjOFktBMm84x194VyepthO";
+            Algorithm = "ES256",
+            Type = "JWT",
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "ES384",
-                Type = "JWT",
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
 
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
 
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
 
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJFUzM4NCIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
-
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "ES384",
-
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
-
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
-        }
-
-        [Fact]
-        public void ES512()
+        var builder2 = new JwtBuilder
         {
-            var prvKey = @"-----BEGIN PRIVATE KEY-----
+            Algorithm = "ES256",
+
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
+
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+
+    [Fact]
+    public void ES384()
+    {
+        var prvKey = @"RUNTMiAAAAAoECDSEE7PqKvRx+FXWXhpTXIm/ZquCKDa6UXA9+PMQRugM35vcgKAXR2pelQ2SqYjOFktBMm84x194VyepthORPQDRkEIcGIonNbCtCg+Y62sV9prPsXACNS//2huX38=";
+        var pubKey = @"RUNTMSAAAAAoECDSEE7PqKvRx+FXWXhpTXIm/ZquCKDa6UXA9+PMQRugM35vcgKAXR2pelQ2SqYjOFktBMm84x194VyepthO";
+
+        var builder = new JwtBuilder
+        {
+            Algorithm = "ES384",
+            Type = "JWT",
+
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
+
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
+
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJFUzM4NCIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
+
+        var builder2 = new JwtBuilder
+        {
+            Algorithm = "ES384",
+
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
+
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+
+    [Fact]
+    public void ES512()
+    {
+        var prvKey = @"-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgevZzL1gdAFr88hb2
 OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r
 1RTwjmYSi9R/zpBnuQ4EiMnCqfMPWiZqB4QdbAd0E7oH50VpuZ1P087G
 -----END PRIVATE KEY-----";
-            var pubKey = @"-----BEGIN PUBLIC KEY-----
+        var pubKey = @"-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEVs/o5+uQbTjL3chynL4wXgUg2R9
 q9UU8I5mEovUf86QZ7kOBIjJwqnzD1omageEHWwHdBO6B+dFabmdT9POxg==
 -----END PUBLIC KEY-----";
 
-            var builder = new JwtBuilder
-            {
-                Algorithm = "ES512",
-                Type = "JWT",
+        var builder = new JwtBuilder
+        {
+            Algorithm = "ES512",
+            Type = "JWT",
 
-                IssuedAt = 1516239022.ToDateTime(),
-                Expire = DateTime.MinValue,
-                Secret = prvKey,
-            };
+            IssuedAt = 1516239022.ToDateTime().ToLocalTime(),
+            Expire = DateTime.MinValue,
+            Secret = prvKey,
+        };
 
-            var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
-            Assert.NotNull(token);
-            Assert.NotEmpty(token);
+        var token = builder.Encode(new { sub = "1234567890", name = "NewLife", admin = true });
+        Assert.NotNull(token);
+        Assert.NotEmpty(token);
 
-            var ts = token.Split('.');
-            Assert.Equal(3, ts.Length);
-            Assert.Equal("eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9", ts[0]);
-            Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
-            //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
+        var ts = token.Split('.');
+        Assert.Equal(3, ts.Length);
+        Assert.Equal("eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9", ts[0]);
+        Assert.Equal("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik5ld0xpZmUiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ", ts[1]);
+        //Assert.Equal("xyCWz7tNjH4UUkxi7BqlWE4V857XA6SYC-ZFukvexvIgsGQt9SBcpdglz3NfhhrslOwF7HzWZHOJu3RrIFrDFA", ts[2]);
 
-            var builder2 = new JwtBuilder
-            {
-                Algorithm = "ES512",
+        var builder2 = new JwtBuilder
+        {
+            Algorithm = "ES512",
 
-                Secret = pubKey,
-            };
-            var rs = builder2.TryDecode(token, out var msg);
-            Assert.True(rs);
-            Assert.Null(msg);
+            Secret = pubKey,
+        };
+        var rs = builder2.TryDecode(token, out var msg);
+        Assert.True(rs);
+        Assert.Null(msg);
 
-            Assert.Equal("JWT", builder2.Type);
-            Assert.Equal("1234567890", builder2.Subject);
-            Assert.Equal("NewLife", builder2["name"]);
-            Assert.True(builder2["admin"].ToBoolean());
+        Assert.Equal("JWT", builder2.Type);
+        Assert.Equal("1234567890", builder2.Subject);
+        Assert.Equal("NewLife", builder2["name"]);
+        Assert.True(builder2["admin"].ToBoolean());
+    }
+#endif
+
+    [Fact]
+    public void Decode()
+    {
+        var str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJTdG9uZSIsImV4cCI6MTcyMTc1MDM2NiwiaWF0IjoxNzIxNzQzMTY2fQ.cLJyNGqwEPPFBEHfIDbhj8Q9trLTYfzVzFrb7KxGC_Q";
+        var jwt = new JwtBuilder();
+        var rs = jwt.TryDecode(str, out var msg);
+
+        Assert.False(rs);
+    }
+
+    [Fact(DisplayName = "签名被篡改时返回失败与非空消息")]
+    public void TamperedSignature()
+    {
+        var builder = new JwtBuilder { Secret = "Smart", Expire = DateTime.MinValue };
+        var token = builder.Encode(new { sub = "0201" });
+
+        // 篡改签名最后一个字符
+        var tampered = token[..^1] + (token[^1] == 'A' ? "B" : "A");
+
+        var jwt = new JwtBuilder { Secret = "Smart" };
+        var rs = jwt.TryDecode(tampered, out var msg);
+
+        Assert.False(rs);
+        Assert.NotNull(msg);
+        Assert.NotEmpty(msg);
+    }
+
+    [Fact(DisplayName = "算法混淆：公钥当HMAC密钥伪造的HS256令牌被拒绝")]
+    public void AlgorithmConfusion_RejectsForgedHS256()
+    {
+        var keys = RSAHelper.GenerateKey();
+        var prv = keys[0];
+        var pub = keys[1];
+
+        // 正规RS256令牌：私钥签名，公钥验证
+        var signer = new JwtBuilder { Algorithm = "RS256", Secret = prv, Subject = "admin" };
+        var real = signer.Encode(new { sub = "admin" });
+
+        var verifier = new JwtBuilder { Secret = pub };
+        Assert.True(verifier.TryDecode(real, out _));
+
+        // 伪造令牌：攻击者把头部算法降级为HS256，并拿公开的公钥当HMAC密钥签名
+        var header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}".GetBytes().ToUrlBase64();
+        var body = "{\"sub\":\"attacker\",\"exp\":4102444800}".GetBytes().ToUrlBase64();
+        var data = $"{header}.{body}".GetBytes();
+        var sig = data.SHA256(pub.GetBytes());
+        var forged = $"{header}.{body}.{sig.ToUrlBase64()}";
+
+        var verifier2 = new JwtBuilder { Secret = pub };
+        Assert.False(verifier2.TryDecode(forged, out var msg));
+        Assert.NotNull(msg);
+    }
+
+    [Fact(DisplayName = "算法混淆：紧凑格式公钥当HMAC密钥伪造的HS256令牌被拒绝")]
+    public void AlgorithmConfusion_CompactKey_RejectsForgedHS256()
+    {
+        var keys = RSAHelper.GenerateParameters();
+        var prv = keys[0];
+        var pub = keys[1];
+
+        // 正规RS256令牌：私钥签名，紧凑格式公钥验证（防误伤：正常流程不受影响）
+        var signer = new JwtBuilder { Algorithm = "RS256", Secret = prv, Subject = "admin" };
+        var real = signer.Encode(new { sub = "admin" });
+
+        var verifier = new JwtBuilder { Secret = pub };
+        Assert.True(verifier.TryDecode(real, out _));
+
+        // 伪造令牌：头部算法降级为HS256，用公开的紧凑格式公钥作HMAC密钥签名
+        var header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}".GetBytes().ToUrlBase64();
+        var body = "{\"sub\":\"attacker\",\"exp\":4102444800}".GetBytes().ToUrlBase64();
+        var data = $"{header}.{body}".GetBytes();
+        var sig = data.SHA256(pub.GetBytes());
+        var forged = $"{header}.{body}.{sig.ToUrlBase64()}";
+
+        var verifier2 = new JwtBuilder { Secret = pub };
+        Assert.False(verifier2.TryDecode(forged, out var msg));
+        Assert.NotNull(msg);
+
+        // 普通随机字符串密钥的HS256令牌照常通过
+        var normal = new JwtBuilder { Secret = "Smart", Expire = DateTime.MinValue };
+        var token = normal.Encode(new { sub = "0201" });
+        var jwt = new JwtBuilder { Secret = "Smart" };
+        Assert.True(jwt.TryDecode(token, out _));
+    }
+
+    [Fact(DisplayName = "算法混淆：紧凑格式EC公钥当HMAC密钥伪造的HS256令牌被拒绝")]
+    public void AlgorithmConfusion_CompactECKey_RejectsForgedHS256()
+    {
+        var keys = ECDsaHelper.GenerateKey(256);
+        var prv = keys[0];
+        var pub = keys[1];
+
+        // 正规ES256令牌：私钥签名，紧凑格式公钥验证
+        var signer = new JwtBuilder { Algorithm = "ES256", Secret = prv, Subject = "admin" };
+        var real = signer.Encode(new { sub = "admin" });
+
+        var verifier = new JwtBuilder { Secret = pub };
+        Assert.True(verifier.TryDecode(real, out var msg0), msg0);
+
+        // 伪造令牌：头部算法降级为HS256，用公开的紧凑格式EC公钥作HMAC密钥签名
+        var header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}".GetBytes().ToUrlBase64();
+        var body = "{\"sub\":\"attacker\",\"exp\":4102444800}".GetBytes().ToUrlBase64();
+        var data = $"{header}.{body}".GetBytes();
+        var sig = data.SHA256(pub.GetBytes());
+        var forged = $"{header}.{body}.{sig.ToUrlBase64()}";
+
+        var verifier2 = new JwtBuilder { Secret = pub };
+        Assert.False(verifier2.TryDecode(forged, out var msg));
+        Assert.NotNull(msg);
+    }
+
+    [Fact(DisplayName = "算法钉死：令牌算法与期望不一致时验证失败")]
+    public void PinnedAlgorithm_Mismatch_Rejects()
+    {
+        var token = new JwtBuilder { Secret = "Smart" }.Encode(new { sub = "0201" });
+
+        // 期望HS512而令牌声明HS256：签名本身能验证通过，但算法不一致必须拒绝
+        var jwt = new JwtBuilder { Algorithm = "HS512", Secret = "Smart" };
+        Assert.False(jwt.TryDecode(token, out var msg));
+        Assert.NotNull(msg);
+        Assert.Equal("HS256", jwt.TokenAlgorithm);
+    }
+
+    [Fact(DisplayName = "算法钉死：期望与令牌一致时正常通过")]
+    public void PinnedAlgorithm_Match_Passes()
+    {
+        var token = new JwtBuilder { Secret = "Smart" }.Encode(new { sub = "0201" });
+
+        var jwt = new JwtBuilder { Algorithm = "HS256", Secret = "Smart" };
+        Assert.True(jwt.TryDecode(token, out _));
+        Assert.Equal("HS256", jwt.TokenAlgorithm);
+    }
+
+    [Fact(DisplayName = "畸形令牌不抛异常，一律返回失败")]
+    public void MalformedToken_NoThrow()
+    {
+        var jwt = new JwtBuilder { Secret = "1234567890" };
+        var h = "eyJhbGciOiJIUzI1NiJ9";
+        var cases = new[] { "abc", "a.b.c", "!!!.@@@.###", h + ".!!!.xxx", h + ".e30.", h + ".e30.@@@" };
+        foreach (var token in cases)
+        {
+            // Try 语义：非法 Base64 只应返回 false，不能抛 FormatException
+            var rs = jwt.TryDecode(token, out var msg);
+            Assert.False(rs);
+            Assert.NotNull(msg);
+        }
+    }
+
+    [Fact(DisplayName = "未知算法不抛异常，按验证失败处理")]
+    public void UnknownAlgorithm_NoThrow()
+    {
+        var jwt = new JwtBuilder { Secret = "1234567890" };
+        foreach (var alg in new[] { "none", "foo", "HS999" })
+        {
+            var header = $"{{\"alg\":\"{alg}\",\"typ\":\"JWT\"}}".GetBytes().ToUrlBase64();
+            var body = "{\"sub\":\"admin\",\"exp\":4102444800}".GetBytes().ToUrlBase64();
+            var token = $"{header}.{body}.AAAA";
+
+            var rs = jwt.TryDecode(token, out var msg);
+            Assert.False(rs);
+            Assert.NotNull(msg);
         }
     }
 }

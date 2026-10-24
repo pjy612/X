@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using NewLife;
 using NewLife.Log;
 using NewLife.Model;
+using NewLife.Security;
 using NewLife.Serialization;
 using Xunit;
 
 namespace XUnitTest.Serialization;
 
-public class FastJsonTest
+public class FastJsonTest : JsonTestBase
 {
     FastJson _json = new FastJson();
 
@@ -33,63 +34,16 @@ public class FastJsonTest
     [Fact]
     public void DateTimeTest()
     {
-        var str = """
-            [
-                {
-                    "ID": 0,
-                    "Userid": 27,
-                    "ClickTime": "2020-03-09T21:16:17.88",
-                    "AdID": 39,
-                    "AdAmount": 0.43,
-                    "isGive": false,
-                    "AdLinkUrl": "http://www.baidu.com",
-                    "AdImgUrl": "/uploader/swiperPic/405621836.jpg",
-                    "Type": "NewLife.Common.PinYin",
-                    "Offset": "2022-11-29T14:13:17.8763881+08:00"
-                },
-                {
-                    "ID": 0,
-                    "Userid": 27,
-                    "ClickTime": "2020-03-09T21:16:25.9052764+08:00",
-                    "AdID": 40,
-                    "AdAmount": 0.41,
-                    "isGive": false,
-                    "AdLinkUrl": "http://www.baidu.com",
-                    "AdImgUrl": "/uploader/swiperPic/1978468752.jpg",
-                    "Type": "String",
-                    "Offset": "2022-11-29T14:13:17.8763881+08:00"
-                }
-            ]
-            """;
+        var model = new Model();
+        Rand.Fill(model);
+        model.Roles = ["admin", "user"];
+        model.Scores = [1, 2, 3];
+        var js = _json.Write(model, true);
 
-        var models = _json.Read(str, typeof(Model[])) as Model[];
+        var models = _json.Read(_json_value, typeof(Model[])) as Model[];
         Assert.Equal(2, models.Length);
 
-        var m = models[0];
-        Assert.Equal(27, m.UserId);
-        Assert.Equal(new DateTime(2020, 3, 9, 21, 16, 17, 880), m.ClickTime);
-        Assert.Equal(39, m.AdId);
-        Assert.Equal(0.43, m.AdAmount);
-        Assert.False(m.IsGive);
-        Assert.Equal("http://www.baidu.com", m.AdLinkUrl);
-        Assert.Equal("/uploader/swiperPic/405621836.jpg", m.AdImgUrl);
-        Assert.Equal(typeof(NewLife.Common.PinYin), m.Type);
-        Assert.Equal(typeof(String), models[1].Type);
-        Assert.Equal(DateTimeOffset.Parse("2022-11-29T14:13:17.8763881+08:00"), m.Offset);
-    }
-
-    class Model
-    {
-        public Int32 ID { get; set; }
-        public Int32 UserId { get; set; }
-        public DateTime ClickTime { get; set; }
-        public Int32 AdId { get; set; }
-        public Double AdAmount { get; set; }
-        public Boolean IsGive { get; set; }
-        public String AdLinkUrl { get; set; }
-        public String AdImgUrl { get; set; }
-        public Type Type { get; set; }
-        public DateTimeOffset Offset { get; set; }
+        CheckModel(models);
     }
 
     [Fact]
@@ -107,18 +61,22 @@ public class FastJsonTest
             Childs = list,
         };
 
+        var js = new FastJson();
+        var services = new ObjectContainer();
+        js.ServiceProvider = services.BuildServiceProvider();
+
         //var json = model.ToJson();
-        var json = _json.Write(model);
+        var json = js.Write(model);
 
         // 直接反序列化会抛出异常
-        Assert.Throws<Exception>(() => _json.Read(json, typeof(ModelA)));
+        Assert.Throws<Exception>(() => js.Read(json, typeof(ModelA)));
 
-        // 上对象容器
-        ObjectContainer.Current.AddTransient<IDuck, DuckB>();
+        // 上对象容器。随时可以注册服务
+        services.AddTransient<IDuck, DuckB>();
 
         // 再来一次反序列化
         //var model2 = json.ToJsonEntity<ModelA>();
-        var model2 = _json.Read(json, typeof(ModelA)) as ModelA;
+        var model2 = js.Read(json, typeof(ModelA)) as ModelA;
         Assert.NotNull(model2);
         Assert.Equal(2233, model2.ID);
         Assert.Equal(3, model2.Childs.Count);
@@ -213,4 +171,137 @@ public class FastJsonTest
         Assert.Equal(456, dic["bbb"]);
         Assert.Equal(789, dic["ccc"]);
     }
+
+    #region PropertyNaming 序列化与反序列化
+    class NamingModel
+    {
+        public Int32 UserId { get; set; }
+
+        public String UserName { get; set; }
+
+        public DateTime CreateTime { get; set; }
+    }
+
+    [Fact(DisplayName = "CamelCase序列化与反序列化")]
+    public void CamelCaseRoundTrip()
+    {
+        var model = new NamingModel { UserId = 42, UserName = "Stone", CreateTime = new DateTime(2025, 1, 1) };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.CamelCase };
+        var json = _json.Write(model, opt);
+
+        // 序列化后键名应为 camelCase
+        Assert.Contains("\"userId\"", json);
+        Assert.Contains("\"userName\"", json);
+
+        // 反序列化回来
+        var model2 = _json.Read(json, typeof(NamingModel), opt) as NamingModel;
+        Assert.NotNull(model2);
+        Assert.Equal(42, model2.UserId);
+        Assert.Equal("Stone", model2.UserName);
+        Assert.Equal(new DateTime(2025, 1, 1), model2.CreateTime);
+    }
+
+    [Fact(DisplayName = "SnakeCaseLower序列化与反序列化")]
+    public void SnakeCaseLowerRoundTrip()
+    {
+        var model = new NamingModel { UserId = 99, UserName = "Test", CreateTime = new DateTime(2024, 6, 15) };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.SnakeCaseLower };
+        var json = _json.Write(model, opt);
+
+        // 序列化后键名应为 snake_case
+        Assert.Contains("\"user_id\"", json);
+        Assert.Contains("\"user_name\"", json);
+        Assert.Contains("\"create_time\"", json);
+
+        // 反序列化回来
+        var model2 = _json.Read(json, typeof(NamingModel), opt) as NamingModel;
+        Assert.NotNull(model2);
+        Assert.Equal(99, model2.UserId);
+        Assert.Equal("Test", model2.UserName);
+        Assert.Equal(new DateTime(2024, 6, 15), model2.CreateTime);
+    }
+
+    [Fact(DisplayName = "KebabCaseLower序列化与反序列化")]
+    public void KebabCaseLowerRoundTrip()
+    {
+        var model = new NamingModel { UserId = 7, UserName = "Kebab", CreateTime = new DateTime(2023, 3, 20) };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.KebabCaseLower };
+        var json = _json.Write(model, opt);
+
+        // 序列化后键名应为 kebab-case
+        Assert.Contains("\"user-id\"", json);
+        Assert.Contains("\"user-name\"", json);
+
+        // 反序列化回来
+        var model2 = _json.Read(json, typeof(NamingModel), opt) as NamingModel;
+        Assert.NotNull(model2);
+        Assert.Equal(7, model2.UserId);
+        Assert.Equal("Kebab", model2.UserName);
+        Assert.Equal(new DateTime(2023, 3, 20), model2.CreateTime);
+    }
+
+    [Fact(DisplayName = "SnakeCaseUpper序列化与反序列化")]
+    public void SnakeCaseUpperRoundTrip()
+    {
+        var model = new NamingModel { UserId = 88, UserName = "Upper" };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.SnakeCaseUpper };
+        var json = _json.Write(model, opt);
+
+        Assert.Contains("\"USER_ID\"", json);
+        Assert.Contains("\"USER_NAME\"", json);
+
+        var model2 = _json.Read(json, typeof(NamingModel), opt) as NamingModel;
+        Assert.NotNull(model2);
+        Assert.Equal(88, model2.UserId);
+        Assert.Equal("Upper", model2.UserName);
+    }
+
+    [Fact(DisplayName = "KebabCaseUpper序列化与反序列化")]
+    public void KebabCaseUpperRoundTrip()
+    {
+        var model = new NamingModel { UserId = 66, UserName = "KebabUp" };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.KebabCaseUpper };
+        var json = _json.Write(model, opt);
+
+        Assert.Contains("\"USER-ID\"", json);
+        Assert.Contains("\"USER-NAME\"", json);
+
+        var model2 = _json.Read(json, typeof(NamingModel), opt) as NamingModel;
+        Assert.NotNull(model2);
+        Assert.Equal(66, model2.UserId);
+        Assert.Equal("KebabUp", model2.UserName);
+    }
+
+    [Fact(DisplayName = "无命名策略直接反序列化CamelCase")]
+    public void NoneNaming_CamelCase_Fallback()
+    {
+        // 即使没有指定命名策略，大小写不敏感兜底也应工作
+        var json = """{"userId":123,"userName":"Fallback"}""";
+        var model = _json.Read(json, typeof(NamingModel)) as NamingModel;
+        Assert.NotNull(model);
+        Assert.Equal(123, model.UserId);
+        Assert.Equal("Fallback", model.UserName);
+    }
+
+    [Fact(DisplayName = "JsonHelper扩展方法支持Options反序列化")]
+    public void ToJsonEntity_WithOptions()
+    {
+        var model = new NamingModel { UserId = 55, UserName = "Helper" };
+
+        var opt = new JsonOptions { PropertyNaming = PropertyNaming.SnakeCaseLower };
+        var json = model.ToJson(opt);
+
+        Assert.Contains("\"user_id\"", json);
+
+        var model2 = json.ToJsonEntity<NamingModel>(opt);
+        Assert.NotNull(model2);
+        Assert.Equal(55, model2.UserId);
+        Assert.Equal("Helper", model2.UserName);
+    }
+    #endregion
 }

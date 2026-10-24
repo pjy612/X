@@ -1,69 +1,190 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Net;
+using System.Threading;
 using NewLife.Collections;
+using NewLife.Data;
 using NewLife.Net;
+using NewLife.Serialization;
 
-namespace NewLife.Http
+namespace NewLife.Http;
+
+/// <summary>Http上下文</summary>
+public interface IHttpContext
 {
-    /// <summary>Http上下文</summary>
-    public interface IHttpContext
+    #region 属性
+    /// <summary>请求</summary>
+    HttpRequest Request { get; }
+
+    /// <summary>响应</summary>
+    HttpResponse Response { get; }
+
+    /// <summary>连接会话</summary>
+    INetSession? Connection { get; }
+
+    /// <summary>Socket连接</summary>
+    ISocketRemote? Socket { get; }
+
+    /// <summary>WebSocket连接</summary>
+    WebSocket? WebSocket { get; }
+
+    /// <summary>执行路径</summary>
+    String Path { get; }
+
+    /// <summary>处理器</summary>
+    IHttpHandler? Handler { get; }
+
+    /// <summary>服务提供者</summary>
+    IServiceProvider? ServiceProvider { get; }
+
+    /// <summary>请求参数</summary>
+    IDictionary<String, Object?> Parameters { get; }
+    #endregion
+}
+
+/// <summary>默认Http上下文</summary>
+public class DefaultHttpContext : IHttpContext
+{
+    #region 属性
+    /// <summary>请求</summary>
+    public HttpRequest Request { get; set; }
+
+    /// <summary>响应</summary>
+    public HttpResponse Response { get; set; } = new HttpResponse();
+
+    /// <summary>连接会话</summary>
+    public INetSession? Connection { get; set; }
+
+    /// <summary>Socket连接</summary>
+    public ISocketRemote? Socket { get; set; }
+
+    /// <summary>WebSocket连接</summary>
+    public WebSocket? WebSocket { get; set; }
+
+    /// <summary>执行路径</summary>
+    public String Path { get; set; }
+
+    /// <summary>处理器</summary>
+    public IHttpHandler? Handler { get; set; }
+
+    /// <summary>服务提供者</summary>
+    public IServiceProvider? ServiceProvider { get; set; }
+
+    /// <summary>请求参数</summary>
+    public IDictionary<String, Object?> Parameters { get; } = new NullableDictionary<String, Object?>(StringComparer.OrdinalIgnoreCase);
+    #endregion
+
+    #region 构造
+    /// <summary>实例化</summary>
+    /// <param name="session"></param>
+    /// <param name="request"></param>
+    /// <param name="path"></param>
+    /// <param name="handler"></param>
+    public DefaultHttpContext(INetSession session, HttpRequest request, String path, IHttpHandler? handler)
     {
-        #region 属性
-        /// <summary>请求</summary>
-        HttpRequest Request { get; }
+        Connection = session;
+        Request = request;
+        Path = path;
+        Handler = handler;
 
-        /// <summary>响应</summary>
-        HttpResponse Response { get; }
-
-        /// <summary>连接会话</summary>
-        INetSession Connection { get; }
-
-        /// <summary>WebSocket连接</summary>
-        WebSocket WebSocket { get; }
-
-        /// <summary>执行路径</summary>
-        String Path { get; }
-
-        /// <summary>处理器</summary>
-        IHttpHandler Handler { get; }
-
-        /// <summary>请求参数</summary>
-        IDictionary<String, Object> Parameters { get; }
-        #endregion
+        Socket = session?.Session;
     }
 
-    /// <summary>默认Http上下文</summary>
-    public class DefaultHttpContext : IHttpContext
+    /// <summary>实例化</summary>
+    /// <param name="socket"></param>
+    /// <param name="request"></param>
+    /// <param name="path"></param>
+    /// <param name="handler"></param>
+    public DefaultHttpContext(ISocketRemote socket, HttpRequest request, String path, IHttpHandler? handler)
     {
-        #region 属性
-        /// <summary>请求</summary>
-        public HttpRequest Request { get; set; }
+        Socket = socket;
+        Request = request;
+        Path = path;
+        Handler = handler;
+    }
+    #endregion
 
-        /// <summary>响应</summary>
-        public HttpResponse Response { get; set; }
+    #region 静态
+#if NET45
+    // net45 无 AsyncLocal，退回线程本地（与 TimerX.Current 同一降级口径）
+    private static readonly ThreadLocal<IHttpContext?> _current = new();
+#else
+    private static readonly AsyncLocal<IHttpContext?> _current = new();
+#endif
 
-        /// <summary>连接会话</summary>
-        public INetSession Connection { get; set; }
+    /// <summary>当前上下文</summary>
+    /// <remarks>
+    /// <para>随异步上下文流动：中间件 <c>await</c> 之后、处理器内 <c>Task.Run</c> 派生的任务里都能取到本请求的上下文。
+    /// 此前用 <c>[ThreadStatic]</c>，异步续体切到别的线程后取到 null（同一请求内"随机"丢失）。</para>
+    /// <para>由 <c>HttpSession</c> 在请求开始置位、请求结束（含异常路径）清空；net45 为线程本地语义。</para>
+    /// </remarks>
+    public static IHttpContext? Current { get => _current.Value; set => _current.Value = value; }
+    #endregion
+}
 
-        /// <summary>WebSocket连接</summary>
-        public WebSocket WebSocket { get; set; }
+/// <summary>Http上下文扩展方法</summary>
+/// <remarks>提供便捷的响应写入方法</remarks>
+public static class HttpContextExtensions
+{
+    /// <summary>写入JSON响应</summary>
+    /// <param name="context">Http上下文</param>
+    /// <param name="data">数据对象</param>
+    /// <param name="statusCode">状态码，默认200</param>
+    public static void WriteJson(this IHttpContext context, Object data, HttpStatusCode statusCode = HttpStatusCode.OK)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Body = (ArrayPacket)data.ToJson().GetBytes();
+    }
 
-        /// <summary>执行路径</summary>
-        public String Path { get; set; }
+    /// <summary>写入纯文本响应</summary>
+    /// <param name="context">Http上下文</param>
+    /// <param name="text">文本内容</param>
+    /// <param name="statusCode">状态码，默认200</param>
+    public static void WriteText(this IHttpContext context, String text, HttpStatusCode statusCode = HttpStatusCode.OK)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        context.Response.Body = (ArrayPacket)text.GetBytes();
+    }
 
-        /// <summary>处理器</summary>
-        public IHttpHandler Handler { get; set; }
+    /// <summary>写入HTML响应</summary>
+    /// <param name="context">Http上下文</param>
+    /// <param name="html">HTML内容</param>
+    /// <param name="statusCode">状态码，默认200</param>
+    public static void WriteHtml(this IHttpContext context, String html, HttpStatusCode statusCode = HttpStatusCode.OK)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Body = (ArrayPacket)html.GetBytes();
+    }
 
-        /// <summary>请求参数</summary>
-        public IDictionary<String, Object> Parameters { get; } = new NullableDictionary<String, Object>(StringComparer.OrdinalIgnoreCase);
-        #endregion
+    /// <summary>重定向</summary>
+    /// <param name="context">Http上下文</param>
+    /// <param name="url">目标URL</param>
+    /// <param name="statusCode">重定向状态码，默认302</param>
+    public static void Redirect(this IHttpContext context, String url, HttpStatusCode statusCode = HttpStatusCode.Redirect)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.Headers["Location"] = url;
+    }
 
-        #region 静态
-        [ThreadStatic]
-        private static IHttpContext _current;
+    /// <summary>发送文件</summary>
+    /// <param name="context">Http上下文</param>
+    /// <param name="filePath">文件路径</param>
+    /// <param name="contentType">内容类型，为空时自动检测</param>
+    public static void WriteFile(this IHttpContext context, String filePath, String? contentType = null)
+    {
+        var fi = filePath.AsFile();
+        if (!fi.Exists)
+        {
+            context.Response.StatusCode = HttpStatusCode.NotFound;
+            return;
+        }
 
-        /// <summary>当前上下文</summary>
-        public static IHttpContext Current { get => _current; set => _current = value; }
-        #endregion
+        contentType ??= MimeHelper.GetContentType(fi.Extension) ?? "application/octet-stream";
+
+        // 流式发送文件内容：流所有权移交响应（发送完成后释放），大文件不物化到内存
+        var fs = fi.OpenRead();
+        context.Response.ContentType = contentType;
+        context.Response.BodyStream = fs;
     }
 }

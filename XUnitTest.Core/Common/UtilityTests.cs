@@ -1,5 +1,8 @@
-﻿using System;
+﻿using System.Globalization;
+using System.Text.Json;
 using Microsoft.Extensions.Primitives;
+using NewLife;
+using NewLife.Log;
 using Xunit;
 
 namespace XUnitTest.Common;
@@ -13,16 +16,78 @@ public class UtilityTests
         Assert.Equal(DateTimeKind.Local, dt.Kind);
         Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss"), dt.ToFullString());
         Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss.fff"), dt.ToFullString(true));
+
         var dt_ = new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, dt.Second);
-        Assert.Equal(dt.Trim(), dt.ToFullString().ToDateTime());
-        Assert.Equal(dt.Trim(), dt.ToInt().ToDateTime());
+        Assert.Equal(DateTimeKind.Unspecified, dt_.Kind);
+        Assert.Equal(dt.Trim(), dt_);
+
+        var dt2 = dt.ToFullString().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
+        Assert.Equal(dt.Trim(), dt2);
+
+        dt2 = dt.ToInt().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
+        Assert.Equal(dt.Trim(), dt2);
+
+        dt2 = dt.ToLong().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
         Assert.Equal(dt.Trim("ms"), dt.ToLong().ToDateTime());
-        Assert.Equal(dt.Trim("m"), dt.ToInt().ToDateTime().AddSeconds(-dt.Second));
-        Assert.Equal(dt.Trim("h"), dt.ToInt().ToDateTime().AddSeconds(-dt.Second).AddMinutes(-dt.Minute));
+
+        dt2 = dt.ToInt().ToDateTime();
+        Assert.Equal(dt.Trim("m"), dt2.AddSeconds(-dt2.Second));
+        Assert.Equal(dt.Trim("h"), dt2.AddSeconds(-dt2.Second).AddMinutes(-dt2.Minute));
         Assert.Empty(DateTime.MinValue.ToFullString(""));
         Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss"), dt.ToString("", ""));
         Assert.Empty(DateTime.MinValue.ToString("", ""));
 
+        var str = dt.ToString("O");
+        XTrace.WriteLine(str);
+        var dtU = str.ToDateTime();
+        Assert.Equal(dt, dtU);
+        Assert.Equal(dt.Kind, dtU.Kind);
+    }
+
+    [Fact]
+    public void UtcTest()
+    {
+        var dt = DateTime.UtcNow;
+        Assert.Equal(DateTimeKind.Utc, dt.Kind);
+        Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss"), dt.ToFullString());
+        Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss.fff"), dt.ToFullString(true));
+
+        var dt_ = new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, dt.Second, DateTimeKind.Utc);
+        Assert.Equal(DateTimeKind.Utc, dt_.Kind);
+        Assert.Equal(dt.Trim(), dt_);
+
+        var dt2 = dt.ToFullString().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
+        Assert.Equal(dt.Trim(), dt2);
+
+        dt2 = dt.ToInt().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
+        Assert.Equal(dt.Trim(), dt2);
+
+        dt2 = dt.ToLong().ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, dt2.Kind);
+        Assert.Equal(dt.Trim("ms"), dt.ToLong().ToDateTime());
+
+        dt2 = dt.ToInt().ToDateTime();
+        Assert.Equal(dt.Trim("m"), dt2.AddSeconds(-dt2.Second));
+        Assert.Equal(dt.Trim("h"), dt2.AddSeconds(-dt2.Second).AddMinutes(-dt2.Minute));
+        Assert.Empty(DateTime.MinValue.ToFullString(""));
+        Assert.Equal(dt.ToString("yyyy-MM-dd HH:mm:ss"), dt.ToString("", ""));
+        Assert.Empty(DateTime.MinValue.ToString("", ""));
+
+        var str = dt.ToString("O");
+        XTrace.WriteLine(str);
+        var dtU = str.ToDateTime();
+        Assert.Equal(dt, dtU);
+        Assert.Equal(dt.Kind, dtU.Kind);
+    }
+
+    [Fact]
+    public void TimeZoneInfoTest()
+    {
         var dto = DateTimeOffset.Now;
         Assert.Equal(dto.ToString("yyyy-MM-dd HH:mm:ss zzz"), dto.ToFullString());
         Assert.Equal(dto.ToString("yyyy-MM-dd HH:mm:ss.fff zzz"), dto.ToFullString(true));
@@ -45,7 +110,9 @@ public class UtilityTests
         Assert.Equal(dt3.Trim("ms"), dt3.ToLong().ToDateTimeOffset());
 
         // Nepal Standard Time,(GMT+05:45) 加德满都,尼泊尔标准时间
-        var dt4 = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(dto, "Nepal Standard Time");
+        // Windows 时区 Id 在 Linux/macOS 上依赖 ICU 映射表（Nepal 的映射在新版 tzdata 已改名），按平台直选可用 Id；两地均为 +05:45
+        var tzId = NewLife.Runtime.Windows ? "Nepal Standard Time" : "Asia/Kathmandu";
+        var dt4 = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(dto, tzId);
         Assert.Equal(dt4.ToString("yyyy-MM-dd HH:mm:ss zzz"), dt4.ToFullString());
         Assert.Equal(dt4.Trim(), dt4.ToFullString().ToDateTimeOffset());
         Assert.Equal(dt4.Trim(), dt4.ToInt().ToDateTimeOffset());
@@ -56,10 +123,10 @@ public class UtilityTests
     public void NanTest()
     {
         var num = Double.NaN;
-   
+
         var dc = num.ToDecimal(123);
         Assert.Equal(123, dc);
-   
+
         var dd = num.ToDouble(456);
         Assert.Equal(456, dd);
     }
@@ -104,6 +171,19 @@ public class UtilityTests
         str = "2022/4/6";
         dt = str.ToDateTime();
         Assert.Equal(new DateTime(2022, 4, 6), dt);
+
+        var dt1970 = new DateTime(1970, 1, 1);
+        var dt1970b = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        // DateTime 改变时区后再相减，结果改变；而 DateTimeOffset 不会
+        // DateTime 减去目标时间，忽略目标时区，直接减去时间值
+        dt = DateTime.UtcNow;
+        var n1 = (Int32)(dt - dt1970).TotalSeconds;
+        var n2 = (Int32)(dt.ToLocalTime() - dt1970).TotalSeconds;
+        var n3 = (Int32)(dt - dt1970b).TotalSeconds;
+        var n4 = (Int32)(dt.ToLocalTime() - dt1970b).TotalSeconds;
+        Assert.Equal(n1, n3);
+        Assert.Equal(n2, n4);
     }
 
     [Fact]
@@ -116,6 +196,18 @@ public class UtilityTests
         str = "2020-03-09T21:16:25.9052764+08:00";
         var df = str.ToDateTimeOffset();
         Assert.Equal(new DateTimeOffset(2020, 3, 9, 21, 16, 25, 905, TimeSpan.FromHours(8)).AddTicks(2764), df);
+
+        var dt1970 = new DateTimeOffset(new DateTime(1970, 1, 1));
+        var dt1970b = new DateTimeOffset(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        // DateTimeOffset 可以改变时区后再相减，结果不变
+        var dto = DateTimeOffset.UtcNow;
+        var n1 = (Int32)(dto - dt1970).TotalSeconds;
+        var n2 = (Int32)(dto.ToLocalTime() - dt1970).TotalSeconds;
+        var n3 = (Int32)(dto - dt1970b).TotalSeconds;
+        var n4 = (Int32)(dto.ToLocalTime() - dt1970b).TotalSeconds;
+        Assert.Equal(n1, n2);
+        Assert.Equal(n3, n4);
     }
 
     [Fact]
@@ -213,7 +305,7 @@ public class UtilityTests
     public void ToDouble()
     {
         var n = 12.34;
-        var buf = BitConverter.GetBytes(n);
+        var buf = n.GetBytes();
         Assert.Equal(8, buf.Length);
 
         var v = buf.ToDouble();
@@ -227,5 +319,349 @@ public class UtilityTests
         var dt = n.ToDateTime();
 
         Assert.Equal(DateTime.MinValue, dt);
+    }
+
+    [Fact]
+    public void UtcTime()
+    {
+        //!!! 两个时间相减，即使时区不同，也不会转为相同时区再相减，而是直接相减
+
+        var now = DateTime.Now;
+        var utc = now.ToUniversalTime();
+        var diff = (Int64)(now - utc).TotalMilliseconds;
+
+        {
+            var baseTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Local);
+            var ms1 = (Int64)(now - baseTime).TotalMilliseconds;
+            var ms2 = (Int64)(utc - baseTime).TotalMilliseconds;
+            Assert.Equal(ms1, ms2 + diff);
+        }
+
+        {
+            var baseTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var ms1 = (Int64)(now - baseTime).TotalMilliseconds;
+            var ms2 = (Int64)(utc - baseTime).TotalMilliseconds;
+            Assert.Equal(ms1, ms2 + diff);
+        }
+
+        {
+            var baseTime = new DateTime(1970, 1, 1);
+            var ms1 = (Int64)(now - baseTime).TotalMilliseconds;
+            var ms2 = (Int64)(utc - baseTime).TotalMilliseconds;
+            Assert.Equal(ms1, ms2 + diff);
+        }
+
+        //var time = 0.ToDateTime();
+        //Assert.Equal(DateTimeKind.Local, time.Kind);
+
+        // Unspecified类型的时间，不管是转本地时间还是UTC时间，都会改变时间值
+        now = DateTime.Now.Trim("s");
+        var str = now.ToFullString();
+
+        var time = str.ToDateTime();
+        Assert.Equal(DateTimeKind.Unspecified, time.Kind);
+        Assert.Equal(str, time.ToFullString());
+
+        // github action 服务器刚好是UTC时间，所以这里测试不通过
+        //Assert.NotEqual(str, time.ToLocalTime().ToFullString());
+        //Assert.NotEqual(str, time.ToUniversalTime().ToFullString());
+    }
+
+    [Fact]
+    public void NegativeNumber()
+    {
+        var n = "-1";
+        var v = n.ToInt();
+
+        Assert.Equal(-1, v);
+
+        n = "+1";
+        v = n.ToInt();
+        Assert.Equal(+1, v);
+    }
+
+#if NET6_0_OR_GREATER
+    [Fact]
+    public void JsonNodeTest()
+    {
+        var json = "{\"Code\":1}";
+        var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(json);
+
+        var c = jsonNode["Code"];
+
+        Assert.Equal(1, c.ToInt());
+    }
+#endif
+
+    [Fact]
+    public void BigDoubleTest()
+    {
+        var ticks = DateTime.Now.Ticks;
+        var str = ticks.ToString();
+        var d = str.ToDouble();
+        Assert.Equal(ticks, d);
+
+        str = ticks.ToString("E");
+        var d2 = Double.Parse(str);
+        //Assert.True(Math.Abs(ticks - d) < 10);
+        Assert.Equal(ticks, d2, 1000_0000_0000f);
+
+        var d3 = str.ToDouble();
+        Assert.Equal(ticks, d3, 1000_0000_0000f);
+        Assert.Equal(d2, d3);
+    }
+
+    [Fact]
+    public void BigDecimalTest()
+    {
+        var ticks = (Decimal)DateTime.Now.Ticks;
+        var str = ticks.ToString();
+        var d = str.ToDecimal();
+        Assert.Equal(ticks, d);
+
+        str = ticks.ToString("e");
+        //var d2 = Decimal.Parse(str);
+        //Assert.Equal(ticks, d2, 17);
+        Assert.Throws<FormatException>(() => Decimal.Parse(str));
+
+        var d3 = str.ToDecimal();
+        //Assert.Equal(ticks, d3, 17);
+        Assert.True(Math.Abs(ticks - d3) < 1000_0000_0000);
+        //Assert.Equal(d2, d3);
+    }
+
+    [Fact]
+    public void GMK_Negative_Format()
+    {
+        var n = -1024L;
+        Assert.Equal("-1.00K", n.ToGMK("n2"));
+
+        n = -1L;
+        Assert.Equal("-1", n.ToGMK());
+    }
+
+    [Fact]
+    public void Trim_Ticks_Precision()
+    {
+        var now = DateTime.Now;
+        var ms = now.Trim("ms");
+        Assert.Equal(0, ms.Ticks % TimeSpan.TicksPerMillisecond);
+
+        var s = now.Trim("s");
+        Assert.Equal(0, s.Ticks % TimeSpan.TicksPerSecond);
+
+        var m = now.Trim("m");
+        Assert.Equal(0, m.Ticks % TimeSpan.TicksPerMinute);
+
+        var h = now.Trim("h");
+        Assert.Equal(0, h.Ticks % TimeSpan.TicksPerHour);
+
+        var us = now.Trim("us");
+        Assert.Equal(0, us.Ticks % 10);
+
+        var ns = now.Trim("ns");
+        // DateTime tick = 100ns，按 1 tick 裁剪等于不变
+        Assert.Equal(now, ns);
+    }
+
+    [Fact]
+    public void Decimal_From_Bytes_16()
+    {
+        var expected = 12345.6789m;
+        var bits = Decimal.GetBits(expected); // lo, mid, hi, flags
+        var buf = new Byte[16];
+        // 约定小端：显式写入，避免 BitConverter 的主机字节序影响
+        buf.Write((UInt32)bits[0], 0);
+        buf.Write((UInt32)bits[1], 4);
+        buf.Write((UInt32)bits[2], 8);
+        buf.Write((UInt32)bits[3], 12);
+
+        var val = buf.ToDecimal();
+        Assert.Equal(expected, val);
+    }
+
+    [Fact]
+    public void Boolean_Synonyms()
+    {
+        Assert.True("yes".ToBoolean());
+        Assert.True("Y".ToBoolean());
+        Assert.True("On".ToBoolean());
+        Assert.True("ENABLED".ToBoolean());
+
+        Assert.False("no".ToBoolean());
+        Assert.False("N".ToBoolean());
+        Assert.False("off".ToBoolean());
+        Assert.False("disabled".ToBoolean());
+    }
+
+    [Fact]
+    public void InvariantCulture_Number_Parsing()
+    {
+        var old = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("fr-FR");
+            // 小数点必须是点，千分位逗号：InvariantCulture 不受当前区域影响
+            Assert.Equal(1234.56, "1,234.56".ToDouble());
+            Assert.Equal(1234.56m, "1,234.56".ToDecimal());
+
+            // 设计目标：去掉空格/逗号等分隔符，法语写法会被清理为整数
+            Assert.Equal(123456d, "1 234,56".ToDouble());
+            Assert.Equal(123456m, "1 234,56".ToDecimal());
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = old;
+        }
+    }
+
+    [Fact(DisplayName = "长分隔符包围_不影响解析结果")]
+    public void TrimNumber_LongPaddedInput()
+    {
+        // 前后各 200 个分隔符：分隔符不占输出缓冲，超长脏数据不影响结果
+        var text = new String(' ', 200) + "1,234" + new String('_', 200);
+
+        Assert.Equal(1234, text.ToInt());
+        Assert.Equal(1234L, text.ToLong());
+        Assert.Equal(1234d, text.ToDouble());
+        Assert.Equal(1234m, text.ToDecimal());
+    }
+
+    [Fact(DisplayName = "数码超长_回落默认值且不抛异常")]
+    public void TrimNumber_TooLongDigits()
+    {
+        // 下划线只能靠 TrimNumber 清理（直接解析会失败），清理后的数码超过固定缓冲容量时，
+        // 应回落到默认值，而不是越界写入或抛异常
+        var text = "9_" + new String('9', 300);
+
+        Assert.Equal(-1, text.ToInt(-1));
+        Assert.Equal(0d, text.ToDouble());
+    }
+
+    [Fact(DisplayName = "常见分隔符_清理后正确解析")]
+    public void TrimNumber_Cleans_Common_Separators()
+    {
+        // 逗号 / 空格 / 下划线 会被清理
+        Assert.Equal(123456d, "1,234,56".ToDouble());
+        Assert.Equal(123456d, "1 234 56".ToDouble());
+        Assert.Equal(123456d, "1_234_56".ToDouble());
+
+        // 科学计数法保留
+        Assert.Equal(1.23e6, "1.23e6".ToDouble());
+
+        // 全角数字与全角空格
+        var fullWidth = "１，２３４　５６"; // 1,234?56（全角）
+        Assert.Equal(123456d, fullWidth.ToDouble());
+
+        // 正/负号
+        Assert.Equal(+123456d, "+123,456".ToDouble());
+        Assert.Equal(-123456d, "-123,456".ToDouble());
+
+        // 小数点 + 千分符
+        Assert.Equal(1234.56d, "1,234.56".ToDouble());
+        Assert.Equal(1234.56m, "1,234.56".ToDecimal());
+
+        // 使用逗号作为小数点（如法语），按当前转换策略将被视为清理后整数
+        Assert.Equal(123456d, "1 234,56".ToDouble());
+        Assert.Equal(123456m, "1 234,56".ToDecimal());
+    }
+
+    [Fact]    public void JsonElement_ToInt()
+    {
+        // 整数小数 -> 整数
+        Assert.Equal(42, JsonDocument.Parse("42").RootElement.ToInt());
+
+        // 浮点 JSON 数字经 IConvertible.ToInt32 四舍五入
+        Assert.Equal(4, JsonDocument.Parse("3.9").RootElement.ToInt());
+
+        // 字符串数字
+        Assert.Equal(-100, JsonDocument.Parse("\"-100\"").RootElement.ToInt());
+        Assert.Equal(100, JsonDocument.Parse("\"100\"").RootElement.ToInt());
+
+        // null -> 默认值
+        Assert.Equal(0, JsonDocument.Parse("null").RootElement.ToInt());
+        Assert.Equal(-1, JsonDocument.Parse("null").RootElement.ToInt(-1));
+
+        // 负数
+        Assert.Equal(-5, JsonDocument.Parse("-5").RootElement.ToInt());
+    }
+
+    [Fact]    public void JsonElement_ToLong()
+    {
+        Assert.Equal(9876543210L, JsonDocument.Parse("9876543210").RootElement.ToLong());
+        Assert.Equal(42L, JsonDocument.Parse("\"42\"").RootElement.ToLong());
+        Assert.Equal(0L, JsonDocument.Parse("null").RootElement.ToLong());
+        Assert.Equal(-99L, JsonDocument.Parse("-99").RootElement.ToLong());
+    }
+
+    [Fact]    public void JsonElement_ToDouble()
+    {
+        Assert.Equal(3.14, JsonDocument.Parse("3.14").RootElement.ToDouble());
+        Assert.Equal(100d, JsonDocument.Parse("100").RootElement.ToDouble());
+        Assert.Equal(1.5, JsonDocument.Parse("\"1.5\"").RootElement.ToDouble());
+        Assert.Equal(0d, JsonDocument.Parse("null").RootElement.ToDouble());
+        Assert.Equal(-2.5, JsonDocument.Parse("-2.5").RootElement.ToDouble());
+    }
+
+    [Fact]    public void JsonElement_ToDecimal()
+    {
+        Assert.Equal(12345.67m, JsonDocument.Parse("12345.67").RootElement.ToDecimal());
+        Assert.Equal(999m, JsonDocument.Parse("999").RootElement.ToDecimal());
+        Assert.Equal(0.5m, JsonDocument.Parse("\"0.5\"").RootElement.ToDecimal());
+        Assert.Equal(0m, JsonDocument.Parse("null").RootElement.ToDecimal());
+    }
+
+    [Fact]    public void JsonElement_ToBoolean()
+    {
+        // JSON true/false 小写关键字
+        Assert.True(JsonDocument.Parse("true").RootElement.ToBoolean());
+        Assert.False(JsonDocument.Parse("false").RootElement.ToBoolean());
+
+        // 数字 0/非0
+        Assert.False(JsonDocument.Parse("0").RootElement.ToBoolean());
+        Assert.True(JsonDocument.Parse("1").RootElement.ToBoolean());
+
+        // 字符串 true/false
+        Assert.True(JsonDocument.Parse("\"true\"").RootElement.ToBoolean());
+        Assert.False(JsonDocument.Parse("\"false\"").RootElement.ToBoolean());
+
+        // null -> 默认值
+        Assert.False(JsonDocument.Parse("null").RootElement.ToBoolean());
+        Assert.True(JsonDocument.Parse("null").RootElement.ToBoolean(true));
+    }
+
+    [Fact]    public void JsonElement_ToDateTime()
+    {
+        // 字符串日期
+        var expected = new DateTime(2024, 6, 15, 12, 30, 0);
+        Assert.Equal(expected, JsonDocument.Parse("\"2024-06-15 12:30:00\"").RootElement.ToDateTime());
+
+        // ISO 8601 格式字符串
+        var iso = JsonDocument.Parse("\"2024-06-15T12:30:00\"").RootElement.ToDateTime();
+        Assert.Equal(expected, iso);
+
+        // 整数 Unix 秒
+        var unixSec = (Int64)(expected - new DateTime(1970, 1, 1)).TotalSeconds;
+        Assert.Equal(expected, unixSec.ToDateTime());
+        Assert.Equal(expected, JsonDocument.Parse(unixSec.ToString()).RootElement.ToDateTime());
+
+        // null -> MinValue
+        Assert.Equal(DateTime.MinValue, JsonDocument.Parse("null").RootElement.ToDateTime());
+    }
+
+    [Fact]    public void JsonElement_ToDateTimeOffset()
+    {
+        // 带时区的字符串
+        var expected = new DateTimeOffset(2024, 6, 15, 12, 30, 0, TimeSpan.FromHours(8));
+        Assert.Equal(expected, JsonDocument.Parse("\"2024-06-15T12:30:00+08:00\"").RootElement.ToDateTimeOffset());
+
+        // 整数 Unix 秒转换
+        var dto1970 = new DateTimeOffset(new DateTime(1970, 1, 1), TimeSpan.Zero);
+        var unixSec = (Int32)(expected.ToUniversalTime() - dto1970).TotalSeconds;
+        var result = JsonDocument.Parse(unixSec.ToString()).RootElement.ToDateTimeOffset();
+        Assert.Equal(expected.ToUniversalTime(), result);
+
+        // null -> MinValue
+        Assert.Equal(DateTimeOffset.MinValue, JsonDocument.Parse("null").RootElement.ToDateTimeOffset());
     }
 }

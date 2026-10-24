@@ -1,14 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 using NewLife;
 using NewLife.Log;
+using NewLife.Model;
+using NewLife.Security;
 using NewLife.Serialization;
 using Xunit;
 
 namespace XUnitTest.Serialization;
 
-public class SystemJsonTest
+public class SystemJsonTest : JsonTestBase
 {
     SystemJson _json = new SystemJson();
 
@@ -33,75 +33,19 @@ public class SystemJsonTest
     [Fact]
     public void DateTimeTest()
     {
-        var str = """
-            [
-                {
-                    "ID": 0,
-                    "Userid": 27,
-                    "ClickTime": "2020-03-09T21:16:17.88",
-                    "AdID": 39,
-                    "AdAmount": 0.43,
-                    "isGive": false,
-                    "AdLinkUrl": "http://www.baidu.com",
-                    "AdImgUrl": "/uploader/swiperPic/405621836.jpg",
-                    "Type": "NewLife.Common.PinYin",
-                    "Offset": "2022-11-29T14:13:17.8763881+08:00"
-                },
-                {
-                    "ID": 0,
-                    "Userid": 27,
-                    "ClickTime": "2020-03-09T21:16:25.9052764+08:00",
-                    "AdID": 40,
-                    "AdAmount": 0.41,
-                    "isGive": false,
-                    "AdLinkUrl": "http://www.baidu.com",
-                    "AdImgUrl": "/uploader/swiperPic/1978468752.jpg",
-                    "Type": "String",
-                    "Offset": "2022-11-29T14:13:17.8763881+08:00"
-                }
-            ]
-            """;
+        var model = new Model();
+        Rand.Fill(model);
+        model.Roles = ["admin", "user"];
+        model.Scores = [1, 2, 3];
+        var js = _json.Write(model, true);
 
-        var models = _json.Read(str, typeof(Model[])) as Model[];
+        var models = _json.Read(_json_value, typeof(Model[])) as Model[];
         Assert.Equal(2, models.Length);
 
-        var m = models[0];
-        Assert.Equal(27, m.UserId);
-        Assert.Equal(new DateTime(2020, 3, 9, 21, 16, 17, 880).ToUniversalTime(), m.ClickTime.ToUniversalTime());
-        Assert.Equal(39, m.AdId);
-        Assert.Equal(0.43, m.AdAmount);
-        Assert.False(m.IsGive);
-        Assert.Equal("http://www.baidu.com", m.AdLinkUrl);
-        Assert.Equal("/uploader/swiperPic/405621836.jpg", m.AdImgUrl);
-        Assert.Equal(typeof(NewLife.Common.PinYin), m.Type);
-        Assert.Equal(DateTimeOffset.Parse("2022-11-29T14:13:17.8763881+08:00"), m.Offset);
-
-        m = models[1];
-        Assert.Equal(27, m.UserId);
-        Assert.Equal("2020-03-09T21:16:25.9052764+08:00".ToDateTimeOffset().Trim("us").ToUniversalTime(), m.ClickTime.Trim("us").ToUniversalTime());
-        Assert.Equal(40, m.AdId);
-        Assert.Equal(0.41, m.AdAmount);
-        Assert.False(m.IsGive);
-        Assert.Equal("http://www.baidu.com", m.AdLinkUrl);
-        Assert.Equal("/uploader/swiperPic/1978468752.jpg", m.AdImgUrl);
-        Assert.Equal(typeof(String), m.Type);
-        Assert.Equal(DateTimeOffset.Parse("2022-11-29T14:13:17.8763881+08:00"), m.Offset);
+        CheckModel(models);
     }
 
-    class Model
-    {
-        public Int32 ID { get; set; }
-        public Int32 UserId { get; set; }
-        public DateTime ClickTime { get; set; }
-        public Int32 AdId { get; set; }
-        public Double AdAmount { get; set; }
-        public Boolean IsGive { get; set; }
-        public String AdLinkUrl { get; set; }
-        public String AdImgUrl { get; set; }
-        public Type Type { get; set; }
-        public DateTimeOffset Offset { get; set; }
-    }
-
+#if NET7_0_OR_GREATER
     [Fact]
     public void InterfaceTest()
     {
@@ -117,18 +61,58 @@ public class SystemJsonTest
             Childs = list,
         };
 
+        var js = new SystemJson();
         //var json = model.ToJson();
-        var json = _json.Write(model);
+        var json = js.Write(model);
 
         //// 直接反序列化会抛出异常
-        //Assert.Throws<Exception>(() => _json.Read(json, typeof(ModelA)));
+        //Assert.Throws<Exception>(() => js.Read(json, typeof(ModelA)));
 
         //// 上对象容器
         //ObjectContainer.Current.AddTransient<IDuck, DuckB>();
 
         // 再来一次反序列化
         //var model2 = json.ToJsonEntity<ModelA>();
-        var model2 = _json.Read(json, typeof(ModelA)) as ModelA;
+        var model2 = js.Read(json, typeof(ModelA)) as ModelA;
+        Assert.NotNull(model2);
+        Assert.Equal(2233, model2.ID);
+        Assert.Equal(3, model2.Childs.Count);
+        Assert.Equal("123", model.Childs[0].Name);
+        Assert.Equal("456", model.Childs[1].Name);
+        Assert.Equal("789", model.Childs[2].Name);
+    }
+
+    [Fact]
+    public void InterfaceTest2()
+    {
+        var list = new List<IDuck>
+        {
+            new DuckB { Name = "123" },
+            new DuckB { Name = "456" },
+            new DuckB { Name = "789" }
+        };
+        var model = new ModelA
+        {
+            ID = 2233,
+            Childs = list,
+        };
+
+        var js = new SystemJson();
+        var services = new ObjectContainer();
+        js.ServiceProvider = services.BuildServiceProvider();
+
+        var json = model.ToJson();
+        //var json = js.Write(model);
+
+        //// 直接反序列化会抛出异常
+        //Assert.Throws<NotSupportedException>(() => js.Read(json, typeof(ModelA)));
+
+        // 上对象容器。必须在使用前注册好服务
+        services.AddTransient<IDuck, DuckB>();
+
+        // 再来一次反序列化
+        //var model2 = json.ToJsonEntity<ModelA>();
+        var model2 = js.Read(json, typeof(ModelA)) as ModelA;
         Assert.NotNull(model2);
         Assert.Equal(2233, model2.ID);
         Assert.Equal(3, model2.Childs.Count);
@@ -224,4 +208,85 @@ public class SystemJsonTest
         Assert.Equal(456, dic["bbb"]);
         Assert.Equal(789, dic["ccc"]);
     }
+
+    [Fact]
+    public void ReadTime()
+    {
+        var json = """{"Code":null,"Secret":null,"ClientId":"10.0.0.12@2116","Version":"1.0.2025.0523","Compile":1747977022000,"IP":"10.0.0.12","Macs":"90-FC-42-B5-09-C8,A4-15-C1-79-14-45","UUID":"C40E8D38C77A2BD79419B8C424A0F36E","Time":1747987231793,"ProductCode":"A2FullTest","Name":"A2","OSName":"Ubuntu 18.04 LTS","OSVersion":"3.4.39.0","Architecture":"Arm","MachineName":"A2","UserName":"root","ProcessorCount":4,"Memory":521736192,"TotalSize":7637516288}""";
+
+        XTrace.WriteLine(json);
+
+        var js = new SystemJson();
+        var info = js.Read<NodeInfo>(json);
+        XTrace.WriteLine(info.Compile.ToFullString());
+
+        // Unix 时间戳 1747977022000 毫秒，转换为本地时间后比较
+        var expected = 1747977022000L.ToDateTime().ToLocalTime();
+        Assert.Equal(expected, info.Compile);
+    }
+
+    class NodeInfo
+    {
+        public DateTime Compile { get; set; }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EnumTest(Boolean enumString)
+    {
+        // 字符串
+        var sjs = new SystemJson();
+        var option = new JsonOptions { EnumString = enumString };
+
+        var data = new { Level = LogLevel.Fatal };
+        var json = sjs.Write(data, option);
+
+        var js = new JsonParser(json);
+        var dic = js.Decode() as IDictionary<String, Object>;
+        Assert.NotNull(dic);
+
+        if (enumString)
+            Assert.Equal("Fatal", dic["Level"]);
+        else
+        {
+            Assert.Equal(5, dic["Level"]);
+            Assert.Equal((Int32)LogLevel.Fatal, dic["Level"].ToInt());
+        }
+    }
+
+    [Fact(DisplayName = "上下文透传：运行时类型路径可用且未声明类型回退默认解析器")]
+    public void ContextTest()
+    {
+        var js = new SystemJson(ContextJsonContext.Default);
+
+        // 上下文声明的类型：经运行时类型（Object 入口）完成序列化与反序列化
+        Object model = new ContextModel { Name = "ctx", Count = 42 };
+        var json = js.Write(model);
+        var back = js.Read(json, typeof(ContextModel)) as ContextModel;
+        Assert.NotNull(back);
+        Assert.Equal("ctx", back!.Name);
+        Assert.Equal(42, back.Count);
+
+        // 未在上下文声明的类型：回退默认解析器，行为不变
+        var other = js.Write(new ContextOther { Note = "fallback" });
+        var back2 = js.Read(other, typeof(ContextOther)) as ContextOther;
+        Assert.Equal("fallback", back2?.Note);
+    }
+
+#endif
+}
+
+[JsonSerializable(typeof(ContextModel))]
+partial class ContextJsonContext : JsonSerializerContext { }
+
+class ContextModel
+{
+    public String Name { get; set; } = "";
+    public Int32 Count { get; set; }
+}
+
+class ContextOther
+{
+    public String Note { get; set; } = "";
 }

@@ -1,0 +1,200 @@
+using System.Security.Cryptography;
+using NewLife.Security;
+using Xunit;
+
+namespace XUnitTest.Security;
+
+/// <summary>PKCS7填充转换测试</summary>
+public class PKCS7PaddingTransformTests
+{
+    [Fact(DisplayName = "属性传递自内部Transform")]
+    public void PropertiesDelegateToInner()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+        using var target = new PKCS7PaddingTransform(inner, PaddingMode.PKCS7, true);
+
+        Assert.Equal(inner.InputBlockSize, target.InputBlockSize);
+        Assert.Equal(inner.OutputBlockSize, target.OutputBlockSize);
+        Assert.Equal(inner.CanReuseTransform, target.CanReuseTransform);
+        Assert.Equal(inner.CanTransformMultipleBlocks, target.CanTransformMultipleBlocks);
+    }
+
+    [Fact(DisplayName = "不支持的填充模式抛异常")]
+    public void UnsupportedModeThrows()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+
+        Assert.Throws<NotSupportedException>(() => new PKCS7PaddingTransform(inner, PaddingMode.Zeros, true));
+        Assert.Throws<NotSupportedException>(() => new PKCS7PaddingTransform(inner, PaddingMode.None, true));
+    }
+
+    [Fact(DisplayName = "块大小超出范围抛异常")]
+    public void InvalidBlockSizeThrows()
+    {
+        // 使用块大小为1的变换
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+
+        // 正常创建不抛异常
+        using var _ = new PKCS7PaddingTransform(inner, PaddingMode.PKCS7, true);
+    }
+
+    [Fact(DisplayName = "空数据加密追加完整填充块")]
+    public void TransformFinalBlockEmptyReturnsEmpty()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+        using var target = new PKCS7PaddingTransform(inner, PaddingMode.PKCS7, true);
+
+        // PKCS7 标准要求：空数据加密也必须输出一个完整填充块（16 字节），与 .NET/Java 标准实现互通
+        var result = target.TransformFinalBlock([], 0, 0);
+        Assert.Equal(16, result.Length);
+    }
+
+    [Fact(DisplayName = "PKCS7加密时填充到块边界")]
+    public void EncryptPadsToBlockBoundary()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+        using var target = new PKCS7PaddingTransform(inner, PaddingMode.PKCS7, true);
+
+        // 输入10字节，不足16字节块大小，PKCS7填充6字节到16字节
+        var input = new Byte[10];
+        new Random(42).NextBytes(input);
+        var result = target.TransformFinalBlock(input, 0, input.Length);
+
+        // 输出应为16字节（1个完整块）
+        Assert.Equal(16, result.Length);
+    }
+
+    [Fact(DisplayName = "PKCS7加密解密往返")]
+    public void EncryptDecryptRoundTrip()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+
+        // 不对齐数据
+        var input = new Byte[33];
+        new Random(42).NextBytes(input);
+
+        using var encTransform = new PKCS7PaddingTransform(aes.CreateEncryptor(), PaddingMode.PKCS7, true);
+        var encrypted = encTransform.TransformFinalBlock(input, 0, input.Length);
+
+        using var decTransform = new PKCS7PaddingTransform(aes.CreateDecryptor(), PaddingMode.PKCS7, false);
+        var decrypted = decTransform.TransformFinalBlock(encrypted, 0, encrypted.Length);
+
+        Assert.Equal(input, decrypted);
+    }
+
+    [Fact(DisplayName = "ISO10126填充加密解密往返")]
+    public void Iso10126RoundTrip()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+
+        var input = new Byte[20];
+        new Random(42).NextBytes(input);
+
+        using var encTransform = new PKCS7PaddingTransform(aes.CreateEncryptor(), PaddingMode.ISO10126, true);
+        var encrypted = encTransform.TransformFinalBlock(input, 0, input.Length);
+
+        using var decTransform = new PKCS7PaddingTransform(aes.CreateDecryptor(), PaddingMode.ISO10126, false);
+        var decrypted = decTransform.TransformFinalBlock(encrypted, 0, encrypted.Length);
+
+        Assert.Equal(input, decrypted);
+    }
+
+    [Fact(DisplayName = "ANSIX923填充加密解密往返")]
+    public void AnsiX923RoundTrip()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+
+        var input = new Byte[15];
+        new Random(42).NextBytes(input);
+
+        using var encTransform = new PKCS7PaddingTransform(aes.CreateEncryptor(), PaddingMode.ANSIX923, true);
+        var encrypted = encTransform.TransformFinalBlock(input, 0, input.Length);
+
+        using var decTransform = new PKCS7PaddingTransform(aes.CreateDecryptor(), PaddingMode.ANSIX923, false);
+        var decrypted = decTransform.TransformFinalBlock(encrypted, 0, encrypted.Length);
+
+        Assert.Equal(input, decrypted);
+    }
+
+    [Fact(DisplayName = "对齐数据不额外填充")]
+    public void AlignedDataNoExtraPadding()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+        using var inner = aes.CreateEncryptor();
+        using var target = new PKCS7PaddingTransform(inner, PaddingMode.PKCS7, true);
+
+        // 输入16字节，刚好一个块，PKCS7会填充一整个块
+        var input = new Byte[16];
+        new Random(42).NextBytes(input);
+        var result = target.TransformFinalBlock(input, 0, input.Length);
+
+        // 16字节输入 + 16字节填充 = 32字节
+        Assert.Equal(32, result.Length);
+    }
+
+    /// <summary>单块转换器包装。CanTransformMultipleBlocks=false 用于覆盖多块末尾拷贝路径</summary>
+    private sealed class SingleBlockTransform(ICryptoTransform inner) : ICryptoTransform
+    {
+        public Boolean CanReuseTransform => inner.CanReuseTransform;
+
+        public Boolean CanTransformMultipleBlocks => false;
+
+        public Int32 InputBlockSize => inner.InputBlockSize;
+
+        public Int32 OutputBlockSize => inner.OutputBlockSize;
+
+        public Int32 TransformBlock(Byte[] inputBuffer, Int32 inputOffset, Int32 inputCount, Byte[] outputBuffer, Int32 outputOffset)
+            => inner.TransformBlock(inputBuffer, inputOffset, inputCount, outputBuffer, outputOffset);
+
+        public Byte[] TransformFinalBlock(Byte[] inputBuffer, Int32 inputOffset, Int32 inputCount)
+            => inner.TransformFinalBlock(inputBuffer, inputOffset, inputCount);
+
+        public void Dispose() => inner.Dispose();
+    }
+
+    [Fact(DisplayName = "多块加密在单块转换器下往返正确")]
+    public void MultiBlockWithSingleBlockTransformRoundTrip()
+    {
+        using var aes = Aes.Create();
+        aes.Mode = CipherMode.ECB;
+        aes.Padding = PaddingMode.None;
+
+        // 40 字节 → 填充到 48 字节（3 块），触发 TransformFinalBlock 的多块手动路径
+        var input = new Byte[40];
+        new Random(42).NextBytes(input);
+
+        using var encInner = new SingleBlockTransform(aes.CreateEncryptor());
+        using var enc = new PKCS7PaddingTransform(encInner, PaddingMode.PKCS7, true);
+        var encrypted = enc.TransformFinalBlock(input, 0, input.Length);
+        Assert.Equal(48, encrypted.Length);
+
+        using var decInner = new SingleBlockTransform(aes.CreateDecryptor());
+        using var dec = new PKCS7PaddingTransform(decInner, PaddingMode.PKCS7, false);
+        var decrypted = dec.TransformFinalBlock(encrypted, 0, encrypted.Length);
+
+        Assert.Equal(input, decrypted);
+    }
+}

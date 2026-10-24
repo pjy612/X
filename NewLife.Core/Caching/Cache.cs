@@ -1,11 +1,23 @@
 ﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using NewLife.Log;
+using NewLife.Messaging;
 using NewLife.Security;
 
 namespace NewLife.Caching;
 
 /// <summary>缓存</summary>
-public abstract class Cache : DisposeBase, ICache
+/// <remarks>
+/// 基础抽象，定义通用缓存语义：
+/// <list type="bullet">
+/// <item><description><see cref="Expire"/> 作为默认 TTL（秒），当各 Set 方法传入 <c>expire &lt; 0</c> 时使用。</description></item>
+/// <item><description><c>expire == 0</c> 表示永不过期；<c>&gt; 0</c> 表示从当前起的相对过期（TTL）。</description></item>
+/// <item><description>实现可采用惰性过期策略，已过期键在访问时才清理。</description></item>
+/// <item><description>远端 / 分布式实现中，<see cref="Keys"/>、<see cref="Count"/>、<see cref="Search(String, Int32, Int32)"/> 可能是高复杂度操作，应仅用于诊断。</description></item>
+/// </list>
+/// </remarks>
+public abstract class Cache : DisposeBase, ICache, IEventBusFactory
 {
     #region 静态默认实现
     /// <summary>默认缓存</summary>
@@ -16,13 +28,16 @@ public abstract class Cache : DisposeBase, ICache
     /// <summary>名称</summary>
     public String Name { get; set; }
 
-    /// <summary>默认过期时间。避免Set操作时没有设置过期时间，默认0秒表示不过期</summary>
+    /// <summary>默认过期时间。避免 Set 操作时没有设置过期时间，默认 0 秒表示不过期</summary>
+    /// <remarks>当 Set 相关 API 传入 <c>expire &lt; 0</c> 时使用该值。</remarks>
     public Int32 Expire { get; set; }
 
     /// <summary>获取和设置缓存，使用默认过期时间</summary>
-    /// <param name="key"></param>
-    /// <returns></returns>
-    public virtual Object this[String key] { get => Get<Object>(key); set => Set(key, value); }
+    /// <param name="key">键</param>
+    /// <remarks>
+    /// 通过索引器设置的键等价于 Set(key, value, -1)，即使用 <see cref="Expire"/>；若未设置默认过期时间（为 0）则表示永不过期。
+    /// </remarks>
+    public virtual Object? this[String key] { get => Get<Object>(key); set => Set(key, value); }
 
     /// <summary>缓存个数</summary>
     public abstract Int32 Count { get; }
@@ -33,41 +48,52 @@ public abstract class Cache : DisposeBase, ICache
 
     #region 构造
     /// <summary>构造函数</summary>
-    protected Cache() => Name = GetType().Name.TrimEnd("Cache");
+    protected Cache() => Name = GetType().Name.TrimSuffix("Cache");
+
+    /// <summary>销毁。释放资源</summary>
+    /// <param name="disposing"></param>
+    protected override void Dispose(Boolean disposing)
+    {
+        base.Dispose(disposing);
+
+        _keys = null;
+        //_keys2 = null;
+    }
     #endregion
 
     #region 基础操作
     /// <summary>使用连接字符串初始化配置</summary>
-    /// <param name="config"></param>
+    /// <param name="config">连接/配置字符串；不同实现自行解析</param>
     public virtual void Init(String config) { }
 
     /// <summary>是否包含缓存项</summary>
-    /// <param name="key"></param>
-    /// <returns></returns>
+    /// <param name="key">键</param>
     public abstract Boolean ContainsKey(String key);
 
     /// <summary>设置缓存项</summary>
     /// <param name="key">键</param>
     /// <param name="value">值</param>
-    /// <param name="expire">过期时间，秒</param>
-    /// <returns></returns>
+    /// <param name="expire">过期时间，秒。&lt;0 使用 <see cref="Expire"/>；0 永不过期；&gt;0 相对过期</param>
     public abstract Boolean Set<T>(String key, T value, Int32 expire = -1);
 
     /// <summary>设置缓存项</summary>
     /// <param name="key">键</param>
     /// <param name="value">值</param>
-    /// <param name="expire">过期时间</param>
-    /// <returns></returns>
+    /// <param name="expire">过期时间，相对过期。<see cref="TimeSpan.Zero"/> 永不过期</param>
     public virtual Boolean Set<T>(String key, T value, TimeSpan expire) => Set(key, value, (Int32)expire.TotalSeconds);
 
     /// <summary>获取缓存项</summary>
     /// <param name="key">键</param>
     /// <returns></returns>
+    [return: MaybeNull]
     public abstract T Get<T>(String key);
 
-    /// <summary>批量移除缓存项</summary>
-    /// <param name="keys">键集合</param>
-    /// <returns></returns>
+    /// <summary>移除缓存项。支持 * 与 ? 模式匹配</summary>
+    /// <param name="key">键或模式</param>
+    public abstract Int32 Remove(String key);
+
+    /// <summary>批量移除缓存项。支持 * 与 ? 模式匹配</summary>
+    /// <param name="keys">键或模式集合</param>
     public abstract Int32 Remove(params String[] keys);
 
     /// <summary>清空所有缓存项</summary>
@@ -75,23 +101,22 @@ public abstract class Cache : DisposeBase, ICache
 
     /// <summary>设置缓存项有效期</summary>
     /// <param name="key">键</param>
-    /// <param name="expire">过期时间，秒</param>
+    /// <param name="expire">过期时间，TTL。<see cref="TimeSpan.Zero"/> 永不过期</param>
     public abstract Boolean SetExpire(String key, TimeSpan expire);
 
     /// <summary>获取缓存项有效期</summary>
     /// <param name="key">键</param>
-    /// <returns></returns>
+    /// <returns>剩余 TTL；建议：永不过期返回 <see cref="TimeSpan.Zero"/>；不存在或已过期返回负值</returns>
     public abstract TimeSpan GetExpire(String key);
     #endregion
 
     #region 集合操作
     /// <summary>批量获取缓存项</summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="keys"></param>
-    /// <returns></returns>
-    public virtual IDictionary<String, T> GetAll<T>(IEnumerable<String> keys)
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="keys">键集合</param>
+    public virtual IDictionary<String, T?> GetAll<T>(IEnumerable<String> keys)
     {
-        var dic = new Dictionary<String, T>();
+        var dic = new Dictionary<String, T?>();
         foreach (var key in keys)
         {
             dic[key] = Get<T>(key);
@@ -101,9 +126,9 @@ public abstract class Cache : DisposeBase, ICache
     }
 
     /// <summary>批量设置缓存项</summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="values"></param>
-    /// <param name="expire">过期时间，秒</param>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="values">键值对集合</param>
+    /// <param name="expire">过期时间，秒。&lt;0 使用默认，0 永不过期</param>
     public virtual void SetAll<T>(IDictionary<String, T> values, Int32 expire = -1)
     {
         foreach (var item in values)
@@ -136,11 +161,17 @@ public abstract class Cache : DisposeBase, ICache
     /// <returns></returns>
     public virtual IProducerConsumer<T> GetStack<T>(String key) => throw new NotSupportedException();
 
-    /// <summary>获取Set</summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="key"></param>
-    /// <returns></returns>
+    /// <summary>获取 Set</summary>
+    /// <typeparam name="T">元素类型</typeparam>
+    /// <param name="key">键</param>
     public virtual ICollection<T> GetSet<T>(String key) => throw new NotSupportedException();
+
+    /// <summary>创建事件总线，可发布消息或订阅消息</summary>
+    /// <typeparam name="TEvent">事件类型</typeparam>
+    /// <param name="topic">事件主题</param>
+    /// <param name="clientId">客户标识/消息分组</param>
+    /// <returns></returns>
+    public virtual IEventBus<TEvent> CreateEventBus<TEvent>(String topic, String clientId = "") => new EventBus<TEvent>();
     #endregion
 
     #region 高级操作
@@ -148,8 +179,7 @@ public abstract class Cache : DisposeBase, ICache
     /// <typeparam name="T">值类型</typeparam>
     /// <param name="key">键</param>
     /// <param name="value">值</param>
-    /// <param name="expire">过期时间，秒</param>
-    /// <returns></returns>
+    /// <param name="expire">过期时间，秒。&lt;0 使用默认</param>
     public virtual Boolean Add<T>(String key, T value, Int32 expire = -1)
     {
         if (ContainsKey(key)) return false;
@@ -162,6 +192,7 @@ public abstract class Cache : DisposeBase, ICache
     /// <param name="key">键</param>
     /// <param name="value">值</param>
     /// <returns></returns>
+    [return: MaybeNull]
     public virtual T Replace<T>(String key, T value)
     {
         var rs = Get<T>(key);
@@ -169,29 +200,32 @@ public abstract class Cache : DisposeBase, ICache
         return rs;
     }
 
-    /// <summary>尝试获取指定键，返回是否包含值。有可能缓存项刚好是默认值，或者只是反序列化失败</summary>
+    /// <summary>尝试获取指定键，返回是否包含值</summary>
+    /// <remarks>
+    /// 当返回 <c>false</c> 时一定不存在；返回 <c>true</c> 时，<paramref name="value"/> 可能为默认值（例如存储的是 0 / null）。
+    /// 默认实现：先 Get，若返回非默认值直接成功；否则再调用 ContainsKey 区分"默认值"与"不存在"。
+    /// </remarks>
     /// <typeparam name="T">值类型</typeparam>
     /// <param name="key">键</param>
-    /// <param name="value">值。即使有值也不一定能够返回，可能缓存项刚好是默认值，或者只是反序列化失败</param>
-    /// <returns>返回是否包含值，即使反序列化失败</returns>
-    public virtual Boolean TryGetValue<T>(String key, out T value)
+    /// <param name="value">输出值（可能为默认值）</param>
+    public virtual Boolean TryGetValue<T>(String key, [MaybeNullWhen(false)] out T value)
     {
-        value = Get<T>(key);
-        if (!Equals(value, default)) return true;
+        value = Get<T>(key)!;
+        if (!Equals(value, default(T))) return true;
 
         return ContainsKey(key);
     }
 
     /// <summary>获取 或 添加 缓存数据，在数据不存在时执行委托请求数据</summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="key"></param>
-    /// <param name="callback"></param>
-    /// <param name="expire">过期时间，秒。小于0时采用默认缓存时间<seealso cref="Cache.Expire"/></param>
-    /// <returns></returns>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="key">键</param>
+    /// <param name="callback">缺失时构造函数</param>
+    /// <param name="expire">过期时间，秒。&lt;0 使用默认</param>
+    [return: MaybeNull]
     public virtual T GetOrAdd<T>(String key, Func<String, T> callback, Int32 expire = -1)
     {
         var value = Get<T>(key);
-        if (!Equals(value, default)) return value;
+        if (!Equals(value, default(T))) return value;
 
         if (ContainsKey(key)) return value;
 
@@ -266,37 +300,67 @@ public abstract class Cache : DisposeBase, ICache
             return v;
         }
     }
+
+    /// <summary>搜索键</summary>
+    /// <param name="pattern">匹配字符串。一般支持 *，远端实现可支持 ?</param>
+    /// <param name="offset">开始行（分页偏移）</param>
+    /// <param name="count">搜索个数。默认 -1 表示全部</param>
+    public virtual IEnumerable<String> Search(String pattern, Int32 offset = 0, Int32 count = -1) => [];
     #endregion
 
     #region 事务
-    /// <summary>提交变更。部分提供者需要刷盘</summary>
-    /// <returns></returns>
+    /// <summary>提交变更（部分提供者需要刷盘）</summary>
     public virtual Int32 Commit() => 0;
 
-    /// <summary>申请分布式锁</summary>
-    /// <param name="key">要锁定的key</param>
-    /// <param name="msTimeout">锁等待时间，单位毫秒</param>
-    /// <returns></returns>
-    public IDisposable AcquireLock(String key, Int32 msTimeout)
+    /// <summary>申请分布式锁（简易版）。使用完以后需要主动释放</summary>
+    /// <remarks>
+    /// 需要注意，使用完锁后需调用Dispose方法以释放锁，申请与释放一定是成对出现。
+    /// 
+    /// 线程A申请得到锁key以后，在A主动释放锁或者到达超时时间msTimeout之前，其它线程B申请这个锁都会被阻塞。
+    /// 线程B申请锁key的最大阻塞时间为msTimeout，在到期之前，如果线程A主动释放锁或者A锁定key的超时时间msTimeout已到，那么线程B会抢到锁。
+    /// 
+    /// <code>
+    /// using var rlock = cache.AcquireLock("myKey", 5000);
+    /// //todo 需要分布式锁保护的代码
+    /// rlock.Dispose(); //释放锁。也可以在using语句结束时自动释放
+    /// </code>
+    /// 简化语义：等待时间 = 锁持有时间（<paramref name="msTimeout"/>）。相当于 <see cref="AcquireLock(String, Int32, Int32, Boolean)"/> 中 <c>msExpire = msTimeout</c>。
+    /// </remarks>
+    /// <param name="key">锁键</param>
+    /// <param name="msTimeout">等待及过期时间（毫秒）</param>
+    public virtual IDisposable? AcquireLock(String key, Int32 msTimeout)
     {
         var rlock = new CacheLock(this, key);
-        if (!rlock.Acquire(msTimeout, msTimeout)) throw new InvalidOperationException($"锁定[{key}]失败！msTimeout={msTimeout}");
+        if (!rlock.Acquire(msTimeout, msTimeout)) throw new InvalidOperationException(L.T("Lock [{0}] failed! msTimeout={1}", key, msTimeout));
 
         return rlock;
     }
 
-    /// <summary>申请分布式锁</summary>
+    /// <summary>申请分布式锁。使用完以后需要主动释放</summary>
+    /// <remarks>
+    /// 需要注意，使用完锁后需调用Dispose方法以释放锁，申请与释放一定是成对出现。
+    /// 
+    /// 线程A申请得到锁key以后，在A主动释放锁或者到达超时时间msExpire之前，其它线程B申请这个锁都会被阻塞。
+    /// 线程B申请锁key的最大阻塞时间为msTimeout，在到期之前，如果线程A主动释放锁或者A锁定key的超时时间msExpire已到，那么线程B会抢到锁。
+    /// 
+    /// <code>
+    /// using var rlock = cache.AcquireLock("myKey", 5000, 15000, false);
+    /// if (rlock ==null) throw new Exception("申请锁失败！");
+    /// //todo 需要分布式锁保护的代码
+    /// rlock.Dispose(); //释放锁。也可以在using语句结束时自动释放
+    /// </code>
+    /// </remarks>
     /// <param name="key">要锁定的key</param>
     /// <param name="msTimeout">锁等待时间，申请加锁时如果遇到冲突则等待的最大时间，单位毫秒</param>
     /// <param name="msExpire">锁过期时间，超过该时间如果没有主动释放则自动释放锁，必须整数秒，单位毫秒</param>
     /// <param name="throwOnFailure">失败时是否抛出异常，如果不抛出异常，可通过返回null得知申请锁失败</param>
     /// <returns></returns>
-    public IDisposable AcquireLock(String key, Int32 msTimeout, Int32 msExpire, Boolean throwOnFailure)
+    public virtual IDisposable? AcquireLock(String key, Int32 msTimeout, Int32 msExpire, Boolean throwOnFailure)
     {
         var rlock = new CacheLock(this, key);
         if (!rlock.Acquire(msTimeout, msExpire))
         {
-            if (throwOnFailure) throw new InvalidOperationException($"锁定[{key}]失败！msTimeout={msTimeout}");
+            if (throwOnFailure) throw new InvalidOperationException(L.T("Lock [{0}] failed! msTimeout={1}", key, msTimeout));
 
             return null;
         }
@@ -350,80 +414,102 @@ public abstract class Cache : DisposeBase, ICache
     public virtual Int64 Bench(Boolean rand = false, Int32 batch = 0)
     {
         var cpu = Environment.ProcessorCount;
-        XTrace.WriteLine($"{Name}性能测试[{(rand ? "随机" : "顺序")}]，批大小[{batch}]，逻辑处理器 {cpu:n0} 个");
+        XTrace.WriteLine("{0} performance test [{1}], batch size [{2}], logical processors {3:n0}", Name, rand ? L.TLog("random") : L.TLog("sequential"), batch, cpu);
 
         var rs = 0L;
-        var times = 10_000;
+        var times = GetTimesPerThread(rand, batch);
+
+        // 提前准备Keys，减少性能测试中的干扰
+        var key = "b_";
+        var max = cpu > 64 ? cpu : 64;
+        var maxTimes = times * max;
+        if (!rand) maxTimes = max;
+        _keys = new String[maxTimes];
+
+        var sb = new StringBuilder();
+        for (var i = 0; i < _keys.Length; i++)
+        {
+            sb.Clear();
+            sb.Append(key);
+            sb.Append(i);
+            _keys[i] = sb.ToString();
+        }
 
         // 单线程
-        rs += BenchOne(times, 1, rand, batch);
+        rs += BenchOne(_keys, times, 1, rand, batch);
 
         // 多线程
-        if (cpu != 2) rs += BenchOne(times * 2, 2, rand, batch);
-        if (cpu != 4) rs += BenchOne(times * 4, 4, rand, batch);
-        if (cpu != 8) rs += BenchOne(times * 8, 8, rand, batch);
+        if (cpu != 2) rs += BenchOne(_keys, times * 2, 2, rand, batch);
+        if (cpu != 4) rs += BenchOne(_keys, times * 4, 4, rand, batch);
+        if (cpu != 8) rs += BenchOne(_keys, times * 8, 8, rand, batch);
 
         // CPU个数
-        rs += BenchOne(times * cpu, cpu, rand, batch);
+        rs += BenchOne(_keys, times * cpu, cpu, rand, batch);
 
         //// 1.5倍
         //var cpu2 = cpu * 3 / 2;
         //if (!(new[] { 2, 4, 8, 64, 256 }).Contains(cpu2)) BenchOne(times * cpu2, cpu2, rand);
 
         // 最大
-        if (cpu < 64) rs += BenchOne(times * cpu, 64, rand, batch);
+        if (cpu < 64) rs += BenchOne(_keys, times * cpu, 64, rand, batch);
         //if (cpu * 8 >= 256) BenchOne(times * cpu, cpu * 8, rand);
 
         return rs;
     }
 
+    /// <summary>获取每个线程测试次数</summary>
+    /// <param name="rand"></param>
+    /// <param name="batch"></param>
+    /// <returns></returns>
+    protected virtual Int32 GetTimesPerThread(Boolean rand, Int32 batch) => 10_000;
+
+    private String[]? _keys;
     /// <summary>使用指定线程测试指定次数</summary>
+    /// <param name="keys"></param>
     /// <param name="times">次数</param>
     /// <param name="threads">线程</param>
     /// <param name="rand">随机读写</param>
     /// <param name="batch">批量操作</param>
-    public virtual Int64 BenchOne(Int64 times, Int32 threads, Boolean rand, Int32 batch)
+    public virtual Int64 BenchOne(String[] keys, Int64 times, Int32 threads, Boolean rand, Int32 batch)
     {
         if (threads <= 0) threads = Environment.ProcessorCount;
         if (times <= 0) times = threads * 1_000;
 
-        //XTrace.WriteLine("");
-        XTrace.WriteLine($"测试 {times:n0} 项，{threads,3:n0} 线程");
+        XTrace.WriteLine("Testing {0:n0} items with {1,3:n0} threads", times, threads);
 
         var rs = 3L;
 
-        //提前执行一次网络操作，预热链路
-        var key = "bstr_";
+        // 提前执行一次网络操作，预热链路
+        var key = keys[0];
         Set(key, Rand.NextString(32));
         _ = Get<String>(key);
         Remove(key);
 
         // 赋值测试
-        rs += BenchSet(key, times, threads, rand, batch);
+        rs += BenchSet(keys, times, threads, rand, batch);
 
         // 读取测试
-        rs += BenchGet(key, times, threads, rand, batch);
+        rs += BenchGet(keys, times, threads, rand, batch);
 
         // 删除测试
-        rs += BenchRemove(key, times, threads, rand, batch);
+        rs += BenchRemove(keys, times, threads, rand, batch);
 
         // 累加测试
-        key = "bint_";
-        rs += BenchInc(key, times, threads, rand, batch);
+        rs += BenchInc(keys, times, threads, rand, batch);
 
         return rs;
     }
 
     /// <summary>读取测试</summary>
-    /// <param name="key">键</param>
+    /// <param name="keys">键</param>
     /// <param name="times">次数</param>
     /// <param name="threads">线程</param>
     /// <param name="rand">随机读写</param>
     /// <param name="batch">批量操作</param>
-    protected virtual Int64 BenchGet(String key, Int64 times, Int32 threads, Boolean rand, Int32 batch)
+    protected virtual Int64 BenchGet(String[] keys, Int64 times, Int32 threads, Boolean rand, Int32 batch)
     {
-        //提前执行一次网络操作，预热链路
-        var v = Get<String>(key);
+        // 提前执行一次网络操作，预热链路
+        var v = Get<String>(keys[0]);
 
         var sw = Stopwatch.StartNew();
         if (rand)
@@ -435,26 +521,26 @@ public abstract class Cache : DisposeBase, ICache
                 {
                     for (var i = k; i < times; i += threads)
                     {
-                        var val = Get<String>(key + i);
+                        var val = Get<String>(keys[i % keys.Length]);
                     }
                 }
                 else
                 {
                     var n = 0;
-                    var keys = new String[batch];
+                    var keys2 = new String[batch];
                     for (var i = k; i < times; i += threads)
                     {
-                        keys[n++] = key + i;
+                        keys2[n++] = keys[i % keys.Length];
 
                         if (n >= batch)
                         {
-                            var vals = GetAll<String>(keys);
+                            var vals = GetAll<String>(keys2);
                             n = 0;
                         }
                     }
                     if (n > 0)
                     {
-                        var vals = GetAll<String>(keys.Take(n));
+                        var vals = GetAll<String>(keys2.Take(n));
                     }
                 }
             });
@@ -464,7 +550,7 @@ public abstract class Cache : DisposeBase, ICache
             // 顺序操作，每个线程多次操作同一个key
             Parallel.For(0, threads, k =>
             {
-                var mykey = key + k;
+                var mykey = keys[k];
                 var count = times / threads;
                 for (var i = 0; i < count; i++)
                 {
@@ -474,21 +560,23 @@ public abstract class Cache : DisposeBase, ICache
         }
         sw.Stop();
 
-        var speed = times * 1000 / sw.ElapsedMilliseconds;
-        XTrace.WriteLine($"读取 耗时 {sw.ElapsedMilliseconds,7:n0}ms 速度 {speed,9:n0} ops");
+        var ms = sw.ElapsedMilliseconds;
+        // 耗时不足1ms时按1ms计，避免整毫秒作除数时除零
+        var speed = times * 1000 / (ms > 0 ? ms : 1);
+        XTrace.WriteLine("Read: {0,7:n0} ms, {1,11:n0} ops", ms, speed);
 
         return times + 1;
     }
 
     /// <summary>赋值测试</summary>
-    /// <param name="key">键</param>
+    /// <param name="keys">键</param>
     /// <param name="times">次数</param>
     /// <param name="threads">线程</param>
     /// <param name="rand">随机读写</param>
     /// <param name="batch">批量操作</param>
-    protected virtual Int64 BenchSet(String key, Int64 times, Int32 threads, Boolean rand, Int32 batch)
+    protected virtual Int64 BenchSet(String[] keys, Int64 times, Int32 threads, Boolean rand, Int32 batch)
     {
-        Set(key, Rand.NextString(32));
+        Set(keys[0], Rand.NextString(32));
 
         var sw = Stopwatch.StartNew();
         if (rand)
@@ -501,7 +589,7 @@ public abstract class Cache : DisposeBase, ICache
                 {
                     for (var i = k; i < times; i += threads)
                     {
-                        Set(key + i, val);
+                        Set(keys[i % keys.Length], val);
                     }
                 }
                 else
@@ -510,7 +598,7 @@ public abstract class Cache : DisposeBase, ICache
                     var dic = new Dictionary<String, String>();
                     for (var i = k; i < times; i += threads)
                     {
-                        dic[key + i] = val;
+                        dic[keys[i % keys.Length]] = val;
                         n++;
 
                         if (n >= batch)
@@ -535,7 +623,7 @@ public abstract class Cache : DisposeBase, ICache
             // 顺序操作，每个线程多次操作同一个key
             Parallel.For(0, threads, k =>
             {
-                var mykey = key + k;
+                var mykey = keys[k];
                 var val = Rand.NextString(8);
                 var count = times / threads;
                 for (var i = 0; i < count; i++)
@@ -549,22 +637,24 @@ public abstract class Cache : DisposeBase, ICache
         }
         sw.Stop();
 
-        var speed = times * 1000 / sw.ElapsedMilliseconds;
-        XTrace.WriteLine($"赋值 耗时 {sw.ElapsedMilliseconds,7:n0}ms 速度 {speed,9:n0} ops");
+        var ms = sw.ElapsedMilliseconds;
+        // 耗时不足1ms时按1ms计，避免整毫秒作除数时除零
+        var speed = times * 1000 / (ms > 0 ? ms : 1);
+        XTrace.WriteLine("Set: {0,7:n0} ms, {1,11:n0} ops", ms, speed);
 
         return times + 1;
     }
 
     /// <summary>删除测试</summary>
-    /// <param name="key">键</param>
+    /// <param name="keys">键</param>
     /// <param name="times">次数</param>
     /// <param name="threads">线程</param>
     /// <param name="rand">随机读写</param>
     /// <param name="batch">批量操作</param>
-    protected virtual Int64 BenchRemove(String key, Int64 times, Int32 threads, Boolean rand, Int32 batch)
+    protected virtual Int64 BenchRemove(String[] keys, Int64 times, Int32 threads, Boolean rand, Int32 batch)
     {
-        //提前执行一次网络操作，预热链路
-        Remove(key);
+        // 提前执行一次网络操作，预热链路
+        Remove(keys[0]);
 
         var sw = Stopwatch.StartNew();
         if (rand)
@@ -576,26 +666,26 @@ public abstract class Cache : DisposeBase, ICache
                 {
                     for (var i = k; i < times; i += threads)
                     {
-                        Remove(key + i);
+                        Remove(keys[i % keys.Length]);
                     }
                 }
                 else
                 {
                     var n = 0;
-                    var keys = new String[batch];
+                    var keys2 = new String[batch];
                     for (var i = k; i < times; i += threads)
                     {
-                        keys[n++] = key + i;
+                        keys2[n++] = keys[i % keys.Length];
 
                         if (n >= batch)
                         {
-                            Remove(keys);
+                            Remove(keys2);
                             n = 0;
                         }
                     }
                     if (n > 0)
                     {
-                        Remove(keys.Take(n).ToArray());
+                        Remove(keys2.Take(n).ToArray());
                     }
                 }
 
@@ -608,7 +698,7 @@ public abstract class Cache : DisposeBase, ICache
             // 顺序操作，每个线程多次操作同一个key
             Parallel.For(0, threads, k =>
             {
-                var mykey = key + k;
+                var mykey = keys[k];
                 var count = times / threads;
                 for (var i = 0; i < count; i++)
                 {
@@ -621,22 +711,24 @@ public abstract class Cache : DisposeBase, ICache
         }
         sw.Stop();
 
-        var speed = times * 1000 / sw.ElapsedMilliseconds;
-        XTrace.WriteLine($"删除 耗时 {sw.ElapsedMilliseconds,7:n0}ms 速度 {speed,9:n0} ops");
+        var ms = sw.ElapsedMilliseconds;
+        // 耗时不足1ms时按1ms计，避免整毫秒作除数时除零
+        var speed = times * 1000 / (ms > 0 ? ms : 1);
+        XTrace.WriteLine("Delete: {0,7:n0} ms, {1,11:n0} ops", ms, speed);
 
         return times + 1;
     }
 
     /// <summary>累加测试</summary>
-    /// <param name="key">键</param>
+    /// <param name="keys">键</param>
     /// <param name="times">次数</param>
     /// <param name="threads">线程</param>
     /// <param name="rand">随机读写</param>
     /// <param name="batch">批量操作</param>
-    protected virtual Int64 BenchInc(String key, Int64 times, Int32 threads, Boolean rand, Int32 batch)
+    protected virtual Int64 BenchInc(String[] keys, Int64 times, Int32 threads, Boolean rand, Int32 batch)
     {
-        //提前执行一次网络操作，预热链路
-        Increment(key, 1);
+        // 提前执行一次网络操作，预热链路
+        Increment(keys[0], 1);
 
         var sw = Stopwatch.StartNew();
         if (rand)
@@ -647,7 +739,7 @@ public abstract class Cache : DisposeBase, ICache
                 var val = Rand.Next(100);
                 for (var i = k; i < times; i += threads)
                 {
-                    Increment(key + i, val);
+                    Increment(keys[i % keys.Length], val);
                 }
 
                 // 提交变更
@@ -659,7 +751,7 @@ public abstract class Cache : DisposeBase, ICache
             // 顺序操作，每个线程多次操作同一个key
             Parallel.For(0, threads, k =>
             {
-                var mykey = key + k;
+                var mykey = keys[k];
                 var val = Rand.Next(100);
                 var count = times / threads;
                 for (var i = 0; i < count; i++)
@@ -673,8 +765,10 @@ public abstract class Cache : DisposeBase, ICache
         }
         sw.Stop();
 
-        var speed = times * 1000 / sw.ElapsedMilliseconds;
-        XTrace.WriteLine($"累加 耗时 {sw.ElapsedMilliseconds,7:n0}ms 速度 {speed,9:n0} ops");
+        var ms = sw.ElapsedMilliseconds;
+        // 耗时不足1ms时按1ms计，避免整毫秒作除数时除零
+        var speed = times * 1000 / (ms > 0 ? ms : 1);
+        XTrace.WriteLine("Increment: {0,7:n0} ms, {1,11:n0} ops", ms, speed);
 
         return times + 1;
     }

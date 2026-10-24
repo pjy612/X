@@ -1,25 +1,28 @@
 ﻿using System.ComponentModel;
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net.NetworkInformation;
 using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Security;
 using NewLife.Collections;
+using NewLife.Data;
 using NewLife.Log;
 using NewLife.Model;
 using NewLife.Reflection;
 using NewLife.Serialization;
-using System.Runtime.Versioning;
-using System;
-#if NETFRAMEWORK
-using System.Management;
-using Microsoft.VisualBasic.Devices;
-#endif
-#if NETFRAMEWORK || NET6_0_OR_GREATER
-using Microsoft.Win32;
-#endif
 
 namespace NewLife;
+
+/// <summary>机器信息接口</summary>
+/// <remarks>用于扩展MachineInfo功能，具体应用自定义各字段获取方式</remarks>
+public interface IMachineInfo
+{
+    /// <summary>初始化静态数据</summary>
+    /// <param name="info">机器信息实例</param>
+    void Init(MachineInfo info);
+
+    /// <summary>刷新动态数据</summary>
+    /// <param name="info">机器信息实例</param>
+    void Refresh(MachineInfo info);
+}
 
 /// <summary>机器信息</summary>
 /// <remarks>
@@ -27,86 +30,115 @@ namespace NewLife;
 /// 
 /// 刷新信息成本较高，建议采用单例模式
 /// </remarks>
-public class MachineInfo
+public partial class MachineInfo : IExtend
 {
     #region 属性
     /// <summary>系统名称</summary>
-    [DisplayName("系统名称")]
-    public String OSName { get; set; }
+    [DisplayName("OS name")]
+    public String? OSName { get; set; }
 
     /// <summary>系统版本</summary>
-    [DisplayName("系统版本")]
-    public String OSVersion { get; set; }
+    [DisplayName("OS version")]
+    public String? OSVersion { get; set; }
 
-    /// <summary>产品名称。制造商</summary>
-    [DisplayName("产品名称")]
-    public String Product { get; set; }
+    /// <summary>产品名称</summary>
+    [DisplayName("Product name")]
+    public String? Product { get; set; }
+
+    /// <summary>制造商</summary>
+    [DisplayName("Vendor")]
+    public String? Vendor { get; set; }
 
     /// <summary>处理器型号</summary>
-    [DisplayName("处理器型号")]
-    public String Processor { get; set; }
+    [DisplayName("Processor")]
+    public String? Processor { get; set; }
 
     ///// <summary>处理器序列号。PC处理器序列号绝大部分重复，实际存储处理器的其它信息</summary>
     //public String CpuID { get; set; }
 
     /// <summary>硬件唯一标识。取主板编码，部分品牌存在重复</summary>
-    [DisplayName("硬件唯一标识")]
-    public String UUID { get; set; }
+    [DisplayName("Hardware ID")]
+    public String? UUID { get; set; }
 
     /// <summary>软件唯一标识。系统标识，操作系统重装后更新，Linux系统的machine_id，Android的android_id，Ghost系统存在重复</summary>
-    [DisplayName("软件唯一标识")]
-    public String Guid { get; set; }
+    [DisplayName("Software ID")]
+    public String? Guid { get; set; }
 
     /// <summary>计算机序列号。适用于品牌机，跟笔记本标签显示一致</summary>
-    [DisplayName("计算机序列号")]
-    public String Serial { get; set; }
+    [DisplayName("Serial number")]
+    public String? Serial { get; set; }
 
     /// <summary>主板。序列号或家族信息</summary>
-    [DisplayName("主板")]
-    public String Board { get; set; }
+    [DisplayName("Motherboard")]
+    public String? Board { get; set; }
 
     /// <summary>磁盘序列号</summary>
-    [DisplayName("磁盘序列号")]
-    public String DiskID { get; set; }
+    [DisplayName("Disk serial")]
+    public String? DiskID { get; set; }
 
     /// <summary>内存总量。单位Byte</summary>
-    [DisplayName("内存总量")]
+    [DisplayName("Total memory")]
     public UInt64 Memory { get; set; }
 
     /// <summary>可用内存。单位Byte</summary>
-    [DisplayName("可用内存")]
+    /// <remarks>
+    /// Linux：优先使用 /proc/meminfo 中的 MemAvailable，表示在不触发大量换页或 OOM 的前提下，
+    /// 内核评估仍可安全分配的内存，适合作为应用自我保护（限流/拒绝新任务）以及监控告警阈值的主要依据。
+    /// Windows：对应 GlobalMemoryStatusEx.ullAvailPhys，表示当前可用的物理内存。
+    /// </remarks>
+    [DisplayName("Available memory")]
     public UInt64 AvailableMemory { get; set; }
 
+    /// <summary>空闲内存。单位Byte</summary>
+    /// <remarks>
+    /// Linux：采用 free 命令的宽松口径计算：MemFree + Buffers + Cached + SReclaimable - Shmem，
+    /// 表示当前看起来空闲或可快速回收的内存，适合用于监控展示和人工分析整体内存使用情况。
+    /// Windows：与 AvailableMemory 保持一致，均使用物理可用内存；进行安全可用性判断时应优先参考 AvailableMemory。
+    /// </remarks>
+    [DisplayName("Free memory")]
+    public UInt64 FreeMemory { get; set; }
+
     /// <summary>CPU占用率</summary>
-    [DisplayName("CPU占用率")]
-    public Single CpuRate { get; set; }
+    [DisplayName("CPU usage")]
+    public Double CpuRate { get; set; }
 
     /// <summary>网络上行速度。字节每秒，初始化后首次读取为0</summary>
-    [DisplayName("网络上行速度")]
+    [DisplayName("Uplink speed")]
     public UInt64 UplinkSpeed { get; set; }
 
     /// <summary>网络下行速度。字节每秒，初始化后首次读取为0</summary>
-    [DisplayName("网络下行速度")]
+    [DisplayName("Downlink speed")]
     public UInt64 DownlinkSpeed { get; set; }
 
     /// <summary>温度。单位度</summary>
-    [DisplayName("温度")]
+    [DisplayName("Temperature")]
     public Double Temperature { get; set; }
 
     /// <summary>电池剩余。小于1的小数，常用百分比表示</summary>
-    [DisplayName("电池剩余")]
+    [DisplayName("Battery level")]
     public Double Battery { get; set; }
+
+    private readonly Dictionary<String, Object?> _items = [];
+    IDictionary<String, Object?> IExtend.Items => _items;
+
+    /// <summary>获取 或 设置 扩展属性数据</summary>
+    /// <param name="key">属性键名</param>
+    /// <returns>属性值</returns>
+    public Object? this[String key] { get => _items.TryGetValue(key, out var obj) ? obj : null; set => _items[key] = value; }
     #endregion
 
-    #region 构造
+    #region 全局静态
     /// <summary>当前机器信息。默认null，在RegisterAsync后才能使用</summary>
-    public static MachineInfo Current { get; set; }
+    public static MachineInfo? Current { get; set; }
+
+    /// <summary>机器信息提供者。外部实现可修改部分行为</summary>
+    public static IMachineInfo? Provider { get; set; }
 
     //static MachineInfo() => RegisterAsync().Wait(100);
 
-    private static Task<MachineInfo> _task;
+    private static Task<MachineInfo>? _task;
     /// <summary>异步注册一个初始化后的机器信息实例</summary>
-    /// <returns></returns>
+    /// <returns>初始化后的机器信息实例</returns>
     public static Task<MachineInfo> RegisterAsync()
     {
         if (_task != null) return _task;
@@ -163,25 +195,25 @@ public class MachineInfo
             }
 
             return mi;
-        });
+        }, TaskCreationOptions.LongRunning);
     }
 
     /// <summary>获取当前信息，如果未设置则等待异步注册结果</summary>
-    /// <returns></returns>
-    public static MachineInfo GetCurrent() => Current ?? RegisterAsync().Result;
+    /// <returns>当前机器信息实例</returns>
+    public static MachineInfo GetCurrent() => Current ?? RegisterAsync().ConfigureAwait(false).GetAwaiter().GetResult();
 
     /// <summary>从对象容器中获取一个已注册机器信息实例</summary>
-    /// <returns></returns>
-    public static MachineInfo Resolve() => ObjectContainer.Current.Resolve<MachineInfo>();
+    /// <returns>机器信息实例</returns>
+    public static MachineInfo? Resolve() => ObjectContainer.Current.GetService<MachineInfo>();
     #endregion
 
     #region 方法
-    /// <summary>刷新</summary>
+    /// <summary>初始化静态数据。可能是实例化后执行，也可能是Json反序列化后执行</summary>
     public void Init()
     {
         var osv = Environment.OSVersion;
         if (OSVersion.IsNullOrEmpty()) OSVersion = osv.Version + "";
-        if (OSName.IsNullOrEmpty()) OSName = (osv + "").TrimStart("Microsoft").TrimEnd(OSVersion).Trim();
+        if (OSName.IsNullOrEmpty()) OSName = (osv + "").TrimPrefix("Microsoft").TrimSuffix(OSVersion).Trim();
         if (Guid.IsNullOrEmpty()) Guid = "";
 
         try
@@ -189,21 +221,40 @@ public class MachineInfo
 #if NET5_0_OR_GREATER
             if (OperatingSystem.IsWindows())
                 LoadWindowsInfo();
+            else if (OperatingSystem.IsAndroid())
+                LoadAndroidInfo();
+            else if (OperatingSystem.IsIOS())
+                LoadIOSInfo();
             else if (OperatingSystem.IsLinux())
                 LoadLinuxInfo();
+            else if (OperatingSystem.IsMacOS())
+                LoadMacInfo();
 #else
             if (Runtime.Windows)
                 LoadWindowsInfo();
             else if (Runtime.Linux)
                 LoadLinuxInfo();
 #endif
+
+            Provider?.Init(this);
         }
         catch (Exception ex)
         {
             if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteException(ex);
         }
 
-        // window+netcore 不方便读取注册表，随机生成一个guid，借助文件缓存确保其不变
+        // 裁剪不可见字符，顺带去掉两头空白
+        OSName = Clean(OSName);
+        OSVersion = Clean(OSVersion);
+        Product = Clean(Product);
+        Processor = Clean(Processor);
+        UUID = Clean(UUID);
+        Guid = Clean(Guid);
+        Serial = Clean(Serial);
+        Board = Clean(Board);
+        DiskID = Clean(DiskID);
+
+        // 无法读取系统标识时，随机生成一个guid，借助文件缓存确保其不变
         if (Guid.IsNullOrEmpty()) Guid = "0-" + System.Guid.NewGuid().ToString();
         if (UUID.IsNullOrEmpty()) UUID = "0-" + System.Guid.NewGuid().ToString();
 
@@ -217,405 +268,29 @@ public class MachineInfo
         }
     }
 
-#if NET5_0_OR_GREATER
-    [SupportedOSPlatform("windows")]
-#endif
-    private void LoadWindowsInfo()
-    {
-        var str = "";
+    /// <summary>裁剪不可见字符并去除两端空白</summary>
+    private static String? Clean(String? value) => value.TrimInvisible()?.Trim();
 
-        // 从注册表读取 MachineGuid
-#if NETFRAMEWORK || NET6_0_OR_GREATER
-        var reg = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Cryptography");
-        if (reg != null) str = reg.GetValue("MachineGuid") + "";
-        if (str.IsNullOrEmpty())
-        {
-            reg = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-            if (reg != null) str = reg.GetValue("MachineGuid") + "";
-        }
-
-        if (!str.IsNullOrEmpty()) Guid = str;
-
-        reg = Registry.LocalMachine.OpenSubKey(@"SYSTEM\HardwareConfig");
-        if (reg != null) str = (reg.GetValue("LastConfig") + "")?.Trim('{', '}').ToUpper();
-
-        // UUID取不到时返回 FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF
-        if (!str.IsNullOrEmpty() && !str.EqualIgnoreCase("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")) UUID = str;
-
-        reg = reg.OpenSubKey("Current");
-        if (reg != null) Product = reg.GetValue("SystemProductName") + "";
-
-        reg = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
-        if (reg != null) Processor = reg.GetValue("ProcessorNameString") + "";
-#else
-        str = Execute("reg", @"query HKLM\SOFTWARE\Microsoft\Cryptography /v MachineGuid");
-        if (!str.IsNullOrEmpty() && str.Contains("REG_SZ")) Guid = str.Substring("REG_SZ", null).Trim();
-
-        var csproduct = ReadWmic("csproduct", "Name", "UUID");
-        if (csproduct != null)
-        {
-            if (csproduct.TryGetValue("Name", out str)) Product = str;
-            if (csproduct.TryGetValue("UUID", out str)) UUID = str;
-        }
-#endif
-
-#if NETFRAMEWORK || WINDOWS
-        var ci = new Microsoft.VisualBasic.Devices.ComputerInfo();
-        try
-        {
-            Memory = ci.TotalPhysicalMemory;
-
-            // 系统名取WMI可能出错
-            OSName = ci.OSFullName.TrimStart("Microsoft").Trim();
-            OSVersion = ci.OSVersion;
-        }
-        catch
-        {
-#if !NET5_0
-            try
-            {
-                var reg2 = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
-                if (reg2 != null)
-                {
-                    OSName = reg2.GetValue("ProductName") + "";
-                    OSVersion = reg2.GetValue("ReleaseId") + "";
-                }
-            }
-            catch (Exception ex)
-            {
-                if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteException(ex);
-            }
-#endif
-        }
-#else
-        var os = ReadWmic("os", "Caption", "Version");
-        if (os != null)
-        {
-            if (os.TryGetValue("Caption", out str)) OSName = str.TrimStart("Microsoft").Trim();
-            if (os.TryGetValue("Version", out str)) OSVersion = str;
-        }
-#endif
-
-#if NETFRAMEWORK
-        //Processor = GetInfo("Win32_Processor", "Name");
-        //CpuID = GetInfo("Win32_Processor", "ProcessorId");
-        //var uuid = GetInfo("Win32_ComputerSystemProduct", "UUID");
-        //Product = GetInfo("Win32_ComputerSystemProduct", "Name");
-        DiskID = GetInfo("Win32_DiskDrive", "SerialNumber");
-
-        var sn = GetInfo("Win32_BIOS", "SerialNumber");
-        if (!sn.IsNullOrEmpty() && !sn.EqualIgnoreCase("System Serial Number")) Serial = sn;
-        Board = GetInfo("Win32_BaseBoard", "SerialNumber");
-#else
-        var disk = ReadWmic("diskdrive", "serialnumber");
-        if (disk != null)
-        {
-            if (disk.TryGetValue("serialnumber", out str)) DiskID = str?.Trim();
-        }
-
-        var sn = ReadWmic("bios", "serialnumber");
-        if (sn != null)
-        {
-            if (sn.TryGetValue("serialnumber", out str) && !str.EqualIgnoreCase("System Serial Number")) Serial = str?.Trim();
-        }
-
-        var board = ReadWmic("baseboard", "serialnumber");
-        if (board != null)
-        {
-            if (board.TryGetValue("serialnumber", out str)) Board = str?.Trim();
-        }
-
-        //// 不要在刷新里面取CPU负载，因为运行wmic会导致CPU负载很不准确，影响测量
-        //var cpu = ReadWmic("cpu", "Name", "ProcessorId", "LoadPercentage");
-        //if (cpu != null)
-        //{
-        //    if (cpu.TryGetValue("Name", out str)) Processor = str;
-        //    //if (cpu.TryGetValue("ProcessorId", out str)) CpuID = str;
-        //    if (cpu.TryGetValue("LoadPercentage", out str)) CpuRate = (Single)(str.ToDouble() / 100);
-        //}
-
-        if (OSName.IsNullOrEmpty())
-            OSName = RuntimeInformation.OSDescription.TrimStart("Microsoft").Trim();
-        if (OSVersion.IsNullOrEmpty())
-            OSVersion = Environment.OSVersion.Version.ToString();
-#endif
-    }
-
-    private void LoadLinuxInfo()
-    {
-        var str = GetLinuxName();
-        if (!str.IsNullOrEmpty()) OSName = str;
-
-        var device = ReadDeviceInfo();
-
-        if (device.TryGetValue("Platform", out str))
-            OSName = str;
-        if (device.TryGetValue("Version", out str))
-            OSVersion = str;
-
-        // 树莓派的Hardware无法区分P0/P4
-        var dic = ReadInfo("/proc/cpuinfo");
-        if (dic != null)
-        {
-            if (dic.TryGetValue("Hardware", out str) ||
-                dic.TryGetValue("cpu model", out str) ||
-                dic.TryGetValue("model name", out str))
-                Processor = str?.TrimStart("vendor ");
-
-            if (device.TryGetValue("Product", out str))
-                Product = str;
-            else if (dic.TryGetValue("vendor_id", out str))
-                Product = str;
-            else if (dic.TryGetValue("Model", out str))
-                Product = str;
-
-            //if (device.TryGetValue("Fingerprint", out str) && !str.IsNullOrEmpty())
-            //    CpuID = str;
-            //if (dic.TryGetValue("Serial", out str))
-            //    CpuID = str;
-        }
-
-        var mid = "/etc/machine-id";
-        if (!File.Exists(mid)) mid = "/var/lib/dbus/machine-id";
-        if (TryRead(mid, out var value))
-            Guid = value;
-        else if (device.TryGetValue("android_id", out str) && !str.IsNullOrEmpty() && str != "unknown")
-            Guid = str;
-        //else if (android.TryGetValue("Id", out str))
-        //    Guid = str;
-
-        // DMI信息位于 /sys/class/dmi/id/ 目录，可以直接读取，不需要执行dmidecode命令
-        var uuid = "";
-        var file = "/sys/class/dmi/id/product_uuid";
-        if (!File.Exists(file)) file = "/proc/serial_num";  // miui12支持/proc/serial_num
-        if (TryRead(file, out value))
-            uuid = value;
-        else if (device.TryGetValue("Serial", out str) && str != "unknown")
-            uuid = str;
-        if (!uuid.IsNullOrEmpty()) UUID = uuid;
-
-        // 从release文件读取产品
-        var prd = GetProductByRelease();
-        if (!prd.IsNullOrEmpty()) Product = prd;
-
-        if (prd.IsNullOrEmpty() && TryRead("/sys/class/dmi/id/product_name", out var product_name))
-        {
-            Product = product_name;
-
-            // 增加制造商。如 Tencent Cloud，它的产品名只有 CVM。阿里云产品名 Alibaba Cloud ECS
-            if (TryRead("/sys/class/dmi/id/sys_vendor", out var vendor) && !vendor.IsNullOrEmpty() && !product_name.Contains(vendor))
-            {
-                // 红帽KVM太流行，细化处理
-                if (product_name == "KVM" && vendor == "Red Hat" &&
-                    TryRead("/sys/class/dmi/id/product_version", out var ver) && !ver.IsNullOrEmpty())
-                {
-                    var p = ver.IndexOf('(');
-                    if (p > 0) ver = ver[..p].Trim();
-                    Product = ver;
-                }
-                else
-                    Product = $"{vendor} {product_name}";
-            }
-        }
-
-        file = "/sys/class/dmi/id/product_serial";
-        if (TryRead(file, out value)) Serial = value;
-
-        // 在DMI信息内，没有太好的BoardID取值
-        file = "/sys/class/dmi/id/product_sku";
-        if (TryRead(file, out value) && !value.IsNullOrEmpty())
-            Board = value;
-        else
-        {
-            file = "/sys/class/dmi/id/product_family";
-            if (TryRead(file, out value)) Board = value;
-        }
-
-        var disks = GetFiles("/dev/disk/by-id", true);
-        if (disks.Count == 0) disks = GetFiles("/dev/disk/by-uuid", false);
-        if (disks.Count > 0) DiskID = disks.Where(e => !e.IsNullOrEmpty()).Join(",");
-    }
-
-    private readonly ICollection<String> _excludes = new List<String>();
+    private readonly ICollection<String> _excludes = [];
 
     /// <summary>获取实时数据，如CPU、内存、温度</summary>
     public void Refresh()
     {
         if (Runtime.Windows)
             RefreshWindows();
+#if NET5_0_OR_GREATER
+        else if (OperatingSystem.IsAndroid())
+            RefreshAndroid();
+        else if (OperatingSystem.IsIOS())
+            RefreshIOS();
+#endif
         // 特别识别Linux发行版
         else if (Runtime.Linux)
             RefreshLinux();
 
         RefreshSpeed();
-    }
 
-    private void RefreshWindows()
-    {
-        MEMORYSTATUSEX ms = default;
-        ms.Init();
-        if (GlobalMemoryStatusEx(ref ms))
-        {
-            Memory = ms.ullTotalPhys;
-            AvailableMemory = ms.ullAvailPhys;
-        }
-
-        GetSystemTimes(out var idleTime, out var kernelTime, out var userTime);
-
-        var current = new SystemTime
-        {
-            IdleTime = idleTime.ToLong(),
-            TotalTime = kernelTime.ToLong() + userTime.ToLong(),
-        };
-
-        var idle = current.IdleTime - (_systemTime?.IdleTime ?? 0);
-        var total = current.TotalTime - (_systemTime?.TotalTime ?? 0);
-        _systemTime = current;
-
-        CpuRate = total == 0 ? 0 : (Single)Math.Round((Single)(total - idle) / total, 4);
-
-#if NETFRAMEWORK
-        if (!_excludes.Contains(nameof(Temperature)))
-        {
-            // 读取主板温度，不太准。标准方案是ring0通过IOPort读取CPU温度，太难在基础类库实现
-            var str = GetInfo("Win32_TemperatureProbe", "CurrentReading");
-            if (!str.IsNullOrEmpty())
-            {
-                Temperature = str.SplitAsInt().Average();
-            }
-            else
-            {
-                str = GetInfo("MSAcpi_ThermalZoneTemperature", "CurrentTemperature", "root/wmi");
-                if (!str.IsNullOrEmpty())
-                    Temperature = (str.SplitAsInt().Average() - 2732) / 10.0;
-                else
-                {
-                    if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteLine("Temperature信息无法读取");
-                    _excludes.Add(nameof(Temperature));
-                    Temperature = 0;
-                }
-            }
-        }
-
-        if (!_excludes.Contains(nameof(Battery)))
-        {
-            // 电池剩余
-            var str = GetInfo("Win32_Battery", "EstimatedChargeRemaining");
-            if (!str.IsNullOrEmpty())
-                Battery = str.SplitAsInt().Average() / 100.0;
-            else
-            {
-                if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteLine("Battery信息无法读取");
-                _excludes.Add(nameof(Battery));
-                Battery = 0;
-            }
-        }
-#else
-        if (!_excludes.Contains(nameof(Temperature)))
-        {
-            var temp = ReadWmic(@"/namespace:\\root\wmi path MSAcpi_ThermalZoneTemperature", "CurrentTemperature");
-            if (temp != null && temp.Count > 0)
-            {
-                if (temp.TryGetValue("CurrentTemperature", out var str) && !str.IsNullOrEmpty())
-                    Temperature = (str.SplitAsInt().Average() - 2732) / 10.0;
-            }
-            else
-            {
-                if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteLine("Temperature信息无法读取");
-                _excludes.Add(nameof(Temperature));
-                Temperature = 0;
-            }
-        }
-
-        if (!_excludes.Contains(nameof(Battery)))
-        {
-            var battery = ReadWmic("path win32_battery", "EstimatedChargeRemaining");
-            if (battery != null && battery.Count > 0)
-            {
-                if (battery.TryGetValue("EstimatedChargeRemaining", out var str) && !str.IsNullOrEmpty())
-                    Battery = str.SplitAsInt().Average() / 100.0;
-            }
-            else
-            {
-                if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteLine("Battery信息无法读取");
-                _excludes.Add(nameof(Battery));
-                Battery = 0;
-            }
-        }
-#endif
-    }
-
-    private void RefreshLinux()
-    {
-        var dic = ReadInfo("/proc/meminfo");
-        if (dic != null)
-        {
-            if (dic.TryGetValue("MemTotal", out var str))
-                Memory = (UInt64)str.TrimEnd(" kB").ToInt() * 1024;
-
-            if (dic.TryGetValue("MemAvailable", out str))
-                AvailableMemory = (UInt64)str.TrimEnd(" kB").ToInt() * 1024;
-            else if (dic.TryGetValue("MemFree", out str))
-                AvailableMemory = (UInt64)(str.TrimEnd(" kB").ToInt() + dic["Buffers"].TrimEnd(" kB").ToInt() + dic["Cached"].TrimEnd(" kB").ToInt()) * 1024;
-        }
-
-        // respberrypi + fedora
-        if (TryRead("/sys/class/thermal/thermal_zone0/temp", out var value) ||
-            TryRead("/sys/class/hwmon/hwmon0/temp1_input", out value) ||
-            TryRead("/sys/class/hwmon/hwmon0/temp2_input", out value) ||
-            TryRead("/sys/class/hwmon/hwmon0/device/hwmon/hwmon0/temp2_input", out value) ||
-            TryRead("/sys/devices/virtual/thermal/thermal_zone0/temp", out value))
-            Temperature = value.ToDouble() / 1000;
-        // A2温度获取，Ubuntu 16.04 LTS， Linux 3.4.39
-        else if (TryRead("/sys/class/hwmon/hwmon0/device/temp_value", out value))
-            Temperature = value.Substring(null, ":").ToDouble();
-
-        // 电池剩余
-        if (TryRead("/sys/class/power_supply/BAT0/energy_now", out var energy_now) &&
-            TryRead("/sys/class/power_supply/BAT0/energy_full", out var energy_full))
-        {
-            Battery = energy_now.ToDouble() / energy_full.ToDouble();
-        }
-        else if (TryRead("/sys/class/power_supply/battery/capacity", out var capacity))
-        {
-            Battery = capacity.ToDouble() / 100.0;
-        }
-        else if (Runtime.Mono)
-        {
-            var battery = ReadDeviceBattery();
-            if (battery.TryGetValue("ChargeLevel", out var obj)) Battery = obj.ToDouble();
-        }
-
-        var file = "/proc/stat";
-        if (!_excludes.Contains(nameof(CpuRate)) && File.Exists(file))
-        {
-            // CPU指标：user，nice, system, idle, iowait, irq, softirq
-            // cpu  57057 0 14420 1554816 0 443 0 0 0 0
-            try
-            {
-                using var reader = new StreamReader(file);
-                var line = reader.ReadLine();
-                if (!line.IsNullOrEmpty() && line.StartsWith("cpu"))
-                {
-                    var vs = line.TrimStart("cpu").Trim().Split(' ');
-                    var current = new SystemTime
-                    {
-                        IdleTime = vs[3].ToLong(),
-                        TotalTime = vs.Take(7).Select(e => e.ToLong()).Sum().ToLong(),
-                    };
-
-                    var idle = current.IdleTime - (_systemTime?.IdleTime ?? 0);
-                    var total = current.TotalTime - (_systemTime?.TotalTime ?? 0);
-                    _systemTime = current;
-
-                    CpuRate = total == 0 ? 0 : (Single)Math.Round((Single)(total - idle) / total, 4);
-                }
-            }
-            catch
-            {
-                _excludes.Add(nameof(_excludes));
-            }
-        }
+        Provider?.Refresh(this);
     }
 
     private Int64 _lastTime;
@@ -628,6 +303,7 @@ public class MachineInfo
         var received = 0L;
         try
         {
+            // 包含本地环回和隧道网卡
             // WSL获取网络列表时可能报错
             foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
             {
@@ -662,54 +338,7 @@ public class MachineInfo
     #endregion
 
     #region 辅助
-    /// <summary>获取Linux发行版名称</summary>
-    /// <returns></returns>
-    public static String GetLinuxName()
-    {
-        var fr = "/etc/redhat-release";
-        if (TryRead(fr, out var value)) return value;
-
-        var dr = "/etc/debian-release";
-        if (TryRead(dr, out value)) return value;
-
-        var sr = "/etc/os-release";
-        if (TryRead(sr, out value)) return value?.SplitAsDictionary("=", "\n", true)["PRETTY_NAME"].Trim();
-
-        var uname = Execute("uname", "-sr")?.Trim();
-        if (!uname.IsNullOrEmpty())
-        {
-            // 支持Android系统名
-            var ss = uname.Split('-');
-            foreach (var item in ss)
-            {
-                if (!item.IsNullOrEmpty() && item.StartsWithIgnoreCase("Android")) return item;
-            }
-
-            return uname;
-        }
-
-        return null;
-    }
-
-    private static String GetProductByRelease()
-    {
-        var di = "/etc/".AsDirectory();
-        if (!di.Exists) return null;
-
-        foreach (var fi in di.GetFiles("*-release"))
-        {
-            if (!fi.Name.EqualIgnoreCase("redhat-release", "debian-release", "os-release", "system-release"))
-            {
-                var dic = File.ReadAllText(fi.FullName).SplitAsDictionary("=", "\n", true);
-                if (dic.TryGetValue("BOARD", out var str)) return str;
-                if (dic.TryGetValue("BOARD_NAME", out str)) return str;
-            }
-        }
-
-        return null;
-    }
-
-    private static Boolean TryRead(String fileName, out String value)
+    private static Boolean TryRead(String fileName, [NotNullWhen(true)] out String? value)
     {
         value = null;
 
@@ -725,11 +354,15 @@ public class MachineInfo
         return true;
     }
 
-    private static IDictionary<String, String> ReadInfo(String file, Char separate = ':')
+    /// <summary>读取文件信息，分割为字典</summary>
+    /// <param name="file">文件路径</param>
+    /// <param name="separate">分隔符</param>
+    /// <returns>解析后的字典</returns>
+    public static IDictionary<String, String?>? ReadInfo(String file, Char separate = ':')
     {
         if (file.IsNullOrEmpty() || !File.Exists(file)) return null;
 
-        var dic = new NullableDictionary<String, String>(StringComparer.OrdinalIgnoreCase);
+        var dic = new NullableDictionary<String, String?>(StringComparer.OrdinalIgnoreCase);
 
         using var reader = new StreamReader(file);
         while (!reader.EndOfStream)
@@ -744,7 +377,7 @@ public class MachineInfo
                 {
                     var key = line[..p].Trim();
                     var value = line[(p + 1)..].Trim();
-                    dic[key] = value;
+                    dic[key] = value.TrimInvisible();
                 }
             }
         }
@@ -752,84 +385,24 @@ public class MachineInfo
         return dic;
     }
 
-    private static String Execute(String cmd, String arguments = null)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo(cmd, arguments)
-            {
-                // UseShellExecute 必须 false，以便于后续重定向输出流
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                RedirectStandardOutput = true,
-                //RedirectStandardError = true,
-            };
-            var process = Process.Start(psi);
-            if (!process.WaitForExit(3_000))
-            {
-                process.Kill();
-                return null;
-            }
-
-            return process.StandardOutput.ReadToEnd();
-        }
-        catch { return null; }
-    }
-
-    /// <summary>通过WMIC命令读取信息</summary>
-    /// <param name="type"></param>
-    /// <param name="keys"></param>
+    /// <summary>获取设备信息。用于Xamarin</summary>
+    /// <returns>设备信息字典</returns>
     /// <returns></returns>
-    public static IDictionary<String, String> ReadWmic(String type, params String[] keys)
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "设备信息经 WMI/系统对象反射读取（运行时类型）；读取失败降级为空，不参与业务主链")]
+#if NET5_0_OR_GREATER
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, "Android.OS.Build", "Mono.Android")]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods, "Android.Provider.Settings/Secure", "Mono.Android")]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, "Android.App.Application", "Mono.Android")]
+#endif
+    public static IDictionary<String, String?> ReadDeviceInfo()
     {
-        var dic = new Dictionary<String, String>(StringComparer.OrdinalIgnoreCase);
-
-        var args = $"{type} get {keys.Join(",")} /format:list";
-        var str = Execute("wmic", args)?.Trim();
-        if (str.IsNullOrEmpty()) return dic;
-
-        var ss = str.Split("\r\n");
-        foreach (var item in ss)
-        {
-            var ks = item?.Split('=');
-            if (ks != null && ks.Length >= 2)
-            {
-                var k = ks[0].Trim();
-                var v = ks[1].Trim();
-                if (dic.TryGetValue(k, out var val))
-                    dic[k] = val + "," + v;
-                else
-                    dic[k] = v;
-            }
-        }
-
-        // 排序，避免多个磁盘序列号时，顺序变动
-        //foreach (var item in dic)
-        //{
-        //    if (item.Value.Contains(','))
-        //        dic[item.Key] = item.Value.Split(',').OrderBy(e => e).Join();
-        //}
-        var dic2 = new Dictionary<String, String>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in dic)
-        {
-            if (item.Value.Contains(','))
-                dic2[item.Key] = item.Value.Split(',').OrderBy(e => e).Join();
-            else
-                dic2[item.Key] = item.Value;
-        }
-
-        return dic2;
-    }
-
-    /// <summary>
-    /// 获取设备信息。用于Xamarin
-    /// </summary>
-    /// <returns></returns>
-    public static IDictionary<String, String> ReadDeviceInfo()
-    {
-        var dic = new Dictionary<String, String>();
+        var dic = new Dictionary<String, String?>();
+#if NET5_0_OR_GREATER
+        // .NET for Android 使用 Mono 运行时，但不一定暴露 Mono.Runtime 类型
+        if (!Runtime.Mono && !OperatingSystem.IsAndroid()) return dic;
+#else
         if (!Runtime.Mono) return dic;
+#endif
 
         {
             var type = "Android.OS.Build".GetTypeEx();
@@ -875,13 +448,13 @@ public class MachineInfo
         return dic;
     }
 
-    /// <summary>
-    /// 获取设备电量。用于 Xamarin
-    /// </summary>
+    /// <summary>获取设备电量。用于 Xamarin</summary>
+    /// <returns>设备电量信息字典</returns>
     /// <returns></returns>
-    public static IDictionary<String, Object> ReadDeviceBattery()
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "电池/设备信息经 WMI 对象反射读取（运行时类型）；读取失败降级为空，不参与业务主链")]
+    public static IDictionary<String, Object?> ReadDeviceBattery()
     {
-        var dic = new Dictionary<String, Object>();
+        var dic = new Dictionary<String, Object?>();
         if (!Runtime.Mono) return dic;
 
         var type = "Xamarin.Essentials.Battery".GetTypeEx();
@@ -900,45 +473,17 @@ public class MachineInfo
     }
     #endregion
 
-    #region 内存
-    [DllImport("Kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    [SecurityCritical]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern Boolean GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-
-    internal struct MEMORYSTATUSEX
-    {
-        internal UInt32 dwLength;
-
-        internal UInt32 dwMemoryLoad;
-
-        internal UInt64 ullTotalPhys;
-
-        internal UInt64 ullAvailPhys;
-
-        internal UInt64 ullTotalPageFile;
-
-        internal UInt64 ullAvailPageFile;
-
-        internal UInt64 ullTotalVirtual;
-
-        internal UInt64 ullAvailVirtual;
-
-        internal UInt64 ullAvailExtendedVirtual;
-
-        internal void Init() => dwLength = checked((UInt32)Marshal.SizeOf(typeof(MEMORYSTATUSEX)));
-    }
-    #endregion
-
     #region 磁盘
     /// <summary>获取指定目录所在盘可用空间，默认当前目录</summary>
-    /// <param name="path"></param>
+    /// <param name="path">目录路径</param>
     /// <returns>返回可用空间，字节，获取失败返回-1</returns>
-    public static Int64 GetFreeSpace(String path = null)
+    public static Int64 GetFreeSpace(String? path = null)
     {
         if (path.IsNullOrEmpty()) path = ".";
+        var root = Path.GetPathRoot(path.GetFullPath());
+        if (root.IsNullOrEmpty()) return 0;
 
-        var driveInfo = new DriveInfo(Path.GetPathRoot(path.GetFullPath()));
+        var driveInfo = new DriveInfo(root);
         if (driveInfo == null || !driveInfo.IsReady) return -1;
 
         try
@@ -952,9 +497,9 @@ public class MachineInfo
     }
 
     /// <summary>获取指定目录下文件名，支持去掉后缀的去重，主要用于Linux</summary>
-    /// <param name="path"></param>
-    /// <param name="trimSuffix"></param>
-    /// <returns></returns>
+    /// <param name="path">目录路径</param>
+    /// <param name="trimSuffix">是否去掉后缀进行去重</param>
+    /// <returns>文件名集合</returns>
     public static ICollection<String> GetFiles(String path, Boolean trimSuffix = false)
     {
         var list = new List<String>();
@@ -969,6 +514,7 @@ public class MachineInfo
             var line = item?.Trim();
             if (!line.IsNullOrEmpty())
             {
+                // 前面出现 virtio-uf6fv7fzp6fm1b91fli8 ，后面出现 virtio-uf6fv7fzp6fm1b91fli8-part1
                 if (trimSuffix)
                 {
                     if (!list2.Any(e => e != line && line.StartsWith(e))) list.Add(line);
@@ -985,65 +531,12 @@ public class MachineInfo
     #endregion
 
     #region Windows辅助
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern Boolean GetSystemTimes(out FILETIME idleTime, out FILETIME kernelTime, out FILETIME userTime);
-
-    private struct FILETIME
-    {
-        public UInt32 Low;
-
-        public UInt32 High;
-
-        public FILETIME(Int64 time)
-        {
-            Low = (UInt32)time;
-            High = (UInt32)(time >> 32);
-        }
-
-        public Int64 ToLong() => (Int64)(((UInt64)High << 32) | Low);
-    }
-
     private class SystemTime
     {
         public Int64 IdleTime;
         public Int64 TotalTime;
     }
 
-    private SystemTime _systemTime;
-
-#if NETFRAMEWORK
-    /// <summary>获取WMI信息</summary>
-    /// <param name="path"></param>
-    /// <param name="property"></param>
-    /// <param name="nameSpace"></param>
-    /// <returns></returns>
-    public static String GetInfo(String path, String property, String nameSpace = null)
-    {
-        // Linux Mono不支持WMI
-        if (Runtime.Mono) return "";
-
-        var bbs = new List<String>();
-        try
-        {
-            var wql = $"Select {property} From {path}";
-            var cimobject = new ManagementObjectSearcher(nameSpace, wql);
-            var moc = cimobject.Get();
-            foreach (var mo in moc)
-            {
-                var val = mo?.Properties?[property]?.Value;
-                if (val != null) bbs.Add(val.ToString().Trim());
-            }
-        }
-        catch (Exception ex)
-        {
-            if (XTrace.Log.Level <= LogLevel.Debug) XTrace.WriteLine("WMI.GetInfo({0})失败！{1}", path, ex.Message);
-            return "";
-        }
-
-        bbs.Sort();
-
-        return bbs.Distinct().Join();
-    }
-#endif
+    private SystemTime? _systemTime;
     #endregion
 }

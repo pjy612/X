@@ -1,414 +1,561 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.ComponentModel;
 using System.Diagnostics;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
+using System.Net.Sockets;
 using System.Threading.Tasks;
+using NewLife;
+using NewLife.Http;
 using NewLife.Log;
 using NewLife.Serialization;
 using Xunit;
 
-namespace XUnitTest.Log
+namespace XUnitTest.Log;
+
+public class TracerTests
 {
-    public class TracerTests
+    [Fact]
+    public void Test1()
     {
-        [Fact]
-        public void Test1()
+        var tracer = new DefaultTracer
         {
-            var tracer = new DefaultTracer
+            MaxSamples = 2,
+            MaxErrors = 11
+        };
+
+        //Assert.Throws<ArgumentNullException>(() => tracer.BuildSpan(null));
+        // 空名称
+        {
+            var builder = tracer.BuildSpan(null);
+            Assert.NotNull(builder);
+            Assert.NotNull(builder.Name);
+            Assert.Empty(builder.Name);
+        }
+
+        // 标准用法
+        {
+            var builder = tracer.BuildSpan("test");
+            Assert.NotNull(builder);
+            Assert.Equal(tracer, builder.Tracer);
+            Assert.Equal("test", builder.Name);
+            Assert.True(builder.StartTime > 0);
+            Assert.Equal(0, builder.EndTime);
+
+            using var span = builder.Start();
+            span.Tag = "任意业务数据";
+            Assert.NotEmpty(span.TraceId);
+            Assert.NotEmpty(span.Id);
+            Assert.Null(span.ParentId);
+            Assert.Equal(Runtime.UtcNow.ToLocalTime().Date, span.StartTime.ToDateTime().ToLocalTime().Date);
+
+            Assert.Equal(span, DefaultSpan.Current);
+
+            Thread.Sleep(100);
+            span.Dispose();
+
+            Assert.Null(DefaultSpan.Current);
+
+            var cost = span.EndTime - span.StartTime;
+            Assert.True(cost >= 100);
+            Assert.Null(span.Error);
+
+            Assert.Equal(1, builder.Total);
+            Assert.Equal(0, builder.Errors);
+            Assert.Equal(cost, builder.Cost);
+            Assert.Equal(cost, builder.MaxCost);
+            Assert.Equal(cost, builder.MinCost);
+        }
+
+        // 快速用法
+        {
+            using var span2 = tracer.NewSpan("test2");
+            Thread.Sleep(200);
+            span2.Dispose();
+
+            var cost = span2.EndTime - span2.StartTime;
+            Assert.True(cost >= 200);
+            Assert.Null(span2.Error);
+
+            var builder2 = tracer.BuildSpan("test2");
+            Assert.Equal(1, builder2.Total);
+            Assert.Equal(0, builder2.Errors);
+            Assert.Equal(cost, builder2.Cost);
+            Assert.Equal(cost, builder2.MaxCost);
+            Assert.Equal(cost, builder2.MinCost);
+        }
+
+        var js = tracer.TakeAll().ToJson();
+        Assert.Contains("\"Tag\":\"任意业务数据\"", js);
+    }
+
+    [Fact]
+    public void TestSamples()
+    {
+        var tracer = new DefaultTracer
+        {
+            MaxSamples = 2,
+            MaxErrors = 11
+        };
+
+        // 正常采样
+        //XTrace.WriteLine("Start TestSamples");
+        for (var i = 0; i < 10; i++)
+        {
+            //XTrace.WriteLine("NewSpan {0}", i + 1);
+            using var span = tracer.NewSpan("test");
+        }
+        //XTrace.WriteLine("End TestSamples");
+
+        var builder = tracer.BuildSpan("test");
+        var samples = builder.Samples;
+        Assert.NotNull(samples);
+        Assert.Equal(10, builder.Total);
+        Assert.Equal(tracer.MaxSamples, samples.Count);
+        Assert.NotEqual(samples[0].TraceId, samples[1].TraceId);
+        Assert.NotEqual(samples[0].Id, samples[1].Id);
+
+        // 异常采样
+        for (var i = 0; i < 20; i++)
+        {
+            using var span = tracer.NewSpan("test");
+            span.SetError(new Exception("My Error"), null);
+        }
+
+        var errors = builder.ErrorSamples;
+        Assert.NotNull(errors);
+        Assert.Equal(10 + 20, builder.Total);
+        Assert.Equal(tracer.MaxErrors, errors.Count);
+        Assert.NotEqual(errors[0].TraceId, errors[1].TraceId);
+        Assert.NotEqual(errors[0].Id, errors[1].Id);
+
+        var js = tracer.TakeAll().ToJson();
+    }
+
+    [Fact]
+    public void TestTracerId()
+    {
+        var tracer = new DefaultTracer();
+
+        // 内嵌片段，应该共用TraceId
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
             {
-                MaxSamples = 2,
-                MaxErrors = 11
-            };
-
-            //Assert.Throws<ArgumentNullException>(() => tracer.BuildSpan(null));
-            // 空名称
-            {
-                var builder = tracer.BuildSpan(null);
-                Assert.NotNull(builder);
-                Assert.NotNull(builder.Name);
-                Assert.Empty(builder.Name);
-            }
-
-            // 标准用法
-            {
-                var builder = tracer.BuildSpan("test");
-                Assert.NotNull(builder);
-                Assert.Equal(tracer, builder.Tracer);
-                Assert.Equal("test", builder.Name);
-                Assert.True(builder.StartTime > 0);
-                Assert.Equal(0, builder.EndTime);
-
-                using var span = builder.Start();
-                span.Tag = "任意业务数据";
-                Assert.NotEmpty(span.TraceId);
-                Assert.NotEmpty(span.Id);
-                Assert.Null(span.ParentId);
-                Assert.Equal(DateTime.Today, span.StartTime.ToDateTime().ToLocalTime().Date);
-
                 Assert.Equal(span, DefaultSpan.Current);
 
+                using var span2 = tracer.NewSpan("test2");
+                Assert.Equal(span2, DefaultSpan.Current);
+
+                Assert.Equal(span.TraceId, span2.TraceId);
+                Assert.Equal(span.Id, span2.ParentId);
+                Assert.NotEqual(span.Id, span2.Id);
+
                 Thread.Sleep(100);
-                span.Dispose();
+                {
+                    using var span3 = tracer.NewSpan("test3");
+                    Assert.Equal(span3, DefaultSpan.Current);
 
-                Assert.Null(DefaultSpan.Current);
+                    Assert.Equal(span.TraceId, span3.TraceId);
+                    Assert.Equal(span2.Id, span3.ParentId);
+                    Assert.NotEqual(span2.Id, span3.Id);
 
-                var cost = span.EndTime - span.StartTime;
-                Assert.True(cost >= 100);
-                Assert.Null(span.Error);
+                    // 检查强制采样
+                    var ds1 = span as DefaultSpan;
+                    var ds2 = span2 as DefaultSpan;
+                    var ds3 = span3 as DefaultSpan;
 
-                Assert.Equal(1, builder.Total);
-                Assert.Equal(0, builder.Errors);
-                Assert.Equal(cost, builder.Cost);
-                Assert.Equal(cost, builder.MaxCost);
-                Assert.Equal(cost, builder.MinCost);
+                    Assert.Equal(1, ds1.TraceFlag);
+                    Assert.Equal(1, ds2.TraceFlag);
+                    Assert.Equal(1, ds3.TraceFlag);
+                }
+
+                Assert.Equal(span2, DefaultSpan.Current);
             }
 
-            // 快速用法
+            Assert.Equal(span, DefaultSpan.Current);
+        }
+
+        // 内嵌片段，不同线程应该使用不同TraceId
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
+
+            // 另一个线程建立span，必须用UnsafeQueueUserWorkItem截断上下文传递，否则还是会建立父子关系
+            ISpan span2 = null;
+            var e = new AutoResetEvent(false);
+            ThreadPool.UnsafeQueueUserWorkItem(s =>
+            {
+                span2 = tracer.NewSpan("test2");
+                e.Set();
+            }, null);
+            //Thread.Sleep(100);
+            e.WaitOne();
+
+            //using var span2 = Task.Factory.StartNew(() => tracer.NewSpan("test2"), TaskCreationOptions.LongRunning).Result;
+            Assert.NotEqual(span.TraceId, span2.TraceId);
+            Assert.NotEqual(span.Id, span2.ParentId);
+            span2.Dispose();
+
+            // 检查强制采样
+            var ds1 = span as DefaultSpan;
+            var ds2 = span2 as DefaultSpan;
+
+#if DEBUG
+            Assert.Equal(0, ds1.TraceFlag);
+            Assert.Equal(0, ds2.TraceFlag);
+#endif
+        }
+
+        var builder = tracer.BuildSpan("test");
+#if DEBUG
+        Assert.Equal(2, builder.Total);
+        Assert.Equal(0, builder.Errors);
+#endif
+    }
+
+    [Fact]
+    public async Task TestParentId()
+    {
+        var tracer = new DefaultTracer();
+
+        // QueueUserWorkItem传递上下文
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
+
+            // 另一个线程建立span
+            ISpan span2 = null;
+            var e = new AutoResetEvent(false);
+            ThreadPool.QueueUserWorkItem(s =>
+            {
+                span2 = tracer.NewSpan("test2");
+                e.Set();
+            }, null);
+            //Thread.Sleep(100);
+            e.WaitOne();
+
+            Assert.Equal(span.TraceId, span2.TraceId);
+            Assert.Equal(span.Id, span2.ParentId);
+            span2.Dispose();
+        }
+        AssertSpanCounts(tracer, 1, 1);
+
+        // Task传递上下文
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
+
+            // 另一个线程建立span
+            using var span2 = await Task.Run(() => tracer.NewSpan("test2"));
+            Assert.Equal(span.TraceId, span2.TraceId);
+            Assert.Equal(span.Id, span2.ParentId);
+        }
+        AssertSpanCounts(tracer, 1, 1);
+
+        // Task传递上下文
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
+
+            // 另一个线程建立span
+            using var span2 = await Task.Factory.StartNew(() => tracer.NewSpan("test2"), TaskCreationOptions.LongRunning);
+            Assert.Equal(span.TraceId, span2.TraceId);
+            Assert.Equal(span.Id, span2.ParentId);
+        }
+        AssertSpanCounts(tracer, 1, 1);
+    }
+
+    /// <summary>取走并校验本段埋点统计</summary>
+    /// <remarks>
+    /// DefaultTracer 每 5 秒周期性 flush（TakeAll 清空累计并归还构建器），满载并行跑测时用例耗时可能
+    /// 跨越 flush 点（实测 7 秒），跨段累计断言会随 flush 失真，故按段取数断言
+    /// </remarks>
+    /// <param name="tracer">跟踪器</param>
+    /// <param name="test">本段 test 埋点数</param>
+    /// <param name="test2">本段 test2 埋点数</param>
+    private static void AssertSpanCounts(DefaultTracer tracer, Int32 test, Int32 test2)
+    {
+        var n1 = 0;
+        var n2 = 0;
+        var errors = 0;
+        foreach (var bd in tracer.TakeAll())
+        {
+            if (bd.Name == "test")
+            {
+                n1 += bd.Total;
+                errors += bd.Errors;
+            }
+            else if (bd.Name == "test2")
+            {
+                n2 += bd.Total;
+                errors += bd.Errors;
+            }
+        }
+
+        Assert.Equal(test, n1);
+        Assert.Equal(test2, n2);
+        Assert.Equal(0, errors);
+    }
+
+    [Fact]
+    public void TestError()
+    {
+        var tracer = new DefaultTracer();
+
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
+            {
+                using var span2 = tracer.NewSpan("test");
+                Thread.Sleep(200);
+
+                span2.SetError(new Exception("My Error"), null);
+            }
+        }
+
+        var builder = tracer.BuildSpan("test");
+        Assert.Equal(2, builder.Total);
+        Assert.Equal(1, builder.Errors);
+        Assert.True(builder.Cost >= 100 + 200);
+        Assert.True(builder.MaxCost >= 200);
+    }
+
+    [Fact]
+    public async Task TestHttpClient()
+    {
+        // 本地化：成功请求打到本地服务，失败请求打到"绑定后立即关闭"的端口（连接被拒），不再依赖公网
+        using var server = new HttpServer { Port = 0 };
+        server.Map("/", () => "ok");
+        server.Start();
+
+        var tracer = new DefaultTracer();
+
+        var http = tracer.CreateHttpClient();
+        http.Timeout = TimeSpan.FromSeconds(10);
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("tracer_test v1.3");
+
+        await http.GetStringAsync($"http://127.0.0.1:{server.Port}/?id=1234");
+
+        // 必定拒绝连接的端口：绑定拿号后立即释放，连接被拒即产生错误片段
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var deadPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            await http.GetStringAsync($"http://127.0.0.1:{deadPort}/notfound?name=stone");
+        });
+
+        // 取出全部跟踪数据
+        var bs = tracer.TakeAll();
+        var keys = bs.Select(e => e.Name).ToArray();
+        Assert.True(bs.Length >= 2);
+        Assert.Contains(keys, e => e.Contains($"127.0.0.1:{server.Port}"));
+        Assert.Contains($"http://127.0.0.1:{deadPort}/notfound", keys);
+
+        // 其中一项
+        var builder = bs.FirstOrDefault(e => e.Name == $"http://127.0.0.1:{deadPort}/notfound");
+        Assert.NotNull(builder);
+        Assert.Equal(1, builder.Total);
+        Assert.Equal(1, builder.Errors);
+
+        var span = builder.ErrorSamples[0];
+        //Assert.Equal("tracer_test v1.3", span.Tag);
+        Assert.StartsWith($"GET http://127.0.0.1:{deadPort}/notfound?name=stone", span.Tag);
+    }
+
+    [Fact]
+    public void TestJson()
+    {
+        var tracer = new DefaultTracer();
+
+        {
+            using var span = tracer.NewSpan("test");
+            Thread.Sleep(100);
             {
                 using var span2 = tracer.NewSpan("test2");
                 Thread.Sleep(200);
-                span2.Dispose();
 
-                var cost = span2.EndTime - span2.StartTime;
-                Assert.True(cost >= 200);
-                Assert.Null(span2.Error);
-
-                var builder2 = tracer.BuildSpan("test2");
-                Assert.Equal(1, builder2.Total);
-                Assert.Equal(0, builder2.Errors);
-                Assert.Equal(cost, builder2.Cost);
-                Assert.Equal(cost, builder2.MaxCost);
-                Assert.Equal(cost, builder2.MinCost);
+                span2.SetError(new Exception("My Error"), null);
             }
-
-            var js = tracer.TakeAll().ToJson();
-            Assert.Contains("\"Tag\":\"任意业务数据\"", js);
         }
 
-        [Fact]
-        public void TestSamples()
+        var m = new MyModel { AppId = "Test", Builders = tracer.TakeAll() };
+        var json = m.ToJson();
+
+        var model = json.ToJsonEntity<MyModel>();
+        Assert.NotNull(model);
+        Assert.NotEmpty(model.Builders);
+        Assert.Equal(3, model.Builders.Length);
+        //Assert.Null(model.Builders[0].Tracer);
+        //Assert.Equal("test", model.Builders[0].Name);
+        //Assert.Equal("test2", model.Builders[1].Name);
+        var test2 = model.Builders.First(e => e.Name == "test2");
+        Assert.Single(test2.ErrorSamples);
+    }
+
+    class MyModel
+    {
+        public String AppId { get; set; }
+
+        public ISpanBuilder[] Builders { get; set; }
+    }
+
+    [Fact]
+    [DisplayName("traceId遵循W3C TraceContext，可被标准解析器接受")]
+    public void TraceIdW3cCompliance()
+    {
+        var tracer = new DefaultTracer();
+        using var span = tracer.NewSpan("w3c") as DefaultSpan;
+
+        // traceId固定32位十六进制，spanId固定16位十六进制
+        Assert.Equal(32, span.TraceId.Length);
+        Assert.Equal(16, span.Id.Length);
+        Assert.Matches("^[0-9a-f]{32}$", span.TraceId);
+        Assert.Matches("^[0-9a-f]{16}$", span.Id);
+
+        // 由片段序列化出来的traceparent必须能被W3C标准解析器接受，且原样还原traceId与spanId
+        var traceparent = span.ToString();
+        Assert.True(ActivityContext.TryParse(traceparent, null, out var context), traceparent);
+        Assert.Equal(span.TraceId, context.TraceId.ToHexString());
+        Assert.Equal(span.Id, context.SpanId.ToHexString());
+
+        // 内嵌片段共用traceId，父级指向外层片段
+        using var child = tracer.NewSpan("w3c-child") as DefaultSpan;
+        Assert.Equal(span.TraceId, child.TraceId);
+        Assert.Equal(span.Id, child.ParentId);
+        Assert.True(ActivityContext.TryParse(child.ToString(), null, out var context2), child.ToString());
+        Assert.Equal(span.TraceId, context2.TraceId.ToHexString());
+        Assert.Equal(child.Id, context2.SpanId.ToHexString());
+    }
+
+    [Fact]
+    [DisplayName("服务端片段_星尘跟踪器从请求头继承上游链路")]
+    public void NewServerSpanOnStarTracerInheritsUpstream()
+    {
+        var tracer = new DefaultTracer();
+        var headers = new Dictionary<String, String>
         {
-            var tracer = new DefaultTracer
-            {
-                MaxSamples = 2,
-                MaxErrors = 11
-            };
+            ["traceparent"] = "00-7ae122a215982779017518707e02e4ab-1111111111111111-01",
+        };
 
-            // 正常采样
-            for (var i = 0; i < 10; i++)
-            {
-                using var span = tracer.NewSpan("test");
-            }
+        // 非 OpenTelemetry 跟踪器走"先建片段后吸收上游"的既有路径
+        using var span = tracer.NewServerSpan("api", headers) as DefaultSpan;
 
-            var builder = tracer.BuildSpan("test");
-            var samples = builder.Samples;
-            Assert.NotNull(samples);
-            Assert.Equal(10, builder.Total);
-            Assert.Equal(tracer.MaxSamples, samples.Count);
-            Assert.NotEqual(samples[0].TraceId, samples[1].TraceId);
-            Assert.NotEqual(samples[0].Id, samples[1].Id);
+        Assert.NotNull(span);
+        Assert.Equal("7ae122a215982779017518707e02e4ab", span!.TraceId);
+        Assert.Equal("1111111111111111", span.ParentId);
 
-            // 异常采样
-            for (var i = 0; i < 20; i++)
-            {
-                using var span = tracer.NewSpan("test");
-                span.SetError(new Exception("My Error"), null);
-            }
+        // 无请求头时等同普通片段
+        using var span2 = tracer.NewServerSpan("api", (IDictionary<String, String>?)null) as DefaultSpan;
+        Assert.NotNull(span2);
+        Assert.Equal(32, span2!.TraceId.Length);
+    }
 
-            var errors = builder.ErrorSamples;
-            Assert.NotNull(errors);
-            Assert.Equal(10 + 20, builder.Total);
-            Assert.Equal(tracer.MaxErrors, errors.Count);
-            Assert.NotEqual(errors[0].TraceId, errors[1].TraceId);
-            Assert.NotEqual(errors[0].Id, errors[1].Id);
+    [Fact]
+    [DisplayName("抛弃片段_归还上下文且后续埋点不挂到被抛弃的片段")]
+    public void AbandonRestoresCurrent()
+    {
+        var tracer = new DefaultTracer();
 
-            var js = tracer.TakeAll().ToJson();
-        }
+        var outer = tracer.NewSpan("outer") as DefaultSpan;
+        Assert.NotNull(outer);
+        Assert.Same(outer, DefaultSpan.Current);
 
-        [Fact]
-        public void TestTracerId()
+        var inner = tracer.NewSpan("http-404") as DefaultSpan;
+        Assert.NotNull(inner);
+        Assert.Same(inner, DefaultSpan.Current);
+
+        inner!.Abandon();
+        inner.Dispose();
+
+        // 抛弃的片段要把上下文交还给外层，否则它会一直被 Current 持有
+        Assert.Same(outer, DefaultSpan.Current);
+
+        // 后续埋点挂到外层，而不是这个永远不会上报的片段
+        var after = tracer.NewSpan("after") as DefaultSpan;
+        Assert.NotNull(after);
+        Assert.Equal(outer!.Id, after!.ParentId);
+        Assert.NotEqual(inner.Id, after.ParentId);
+
+        after.Dispose();
+        outer.Dispose();
+    }
+
+    [Fact]
+    [DisplayName("抛弃片段_不计入采集且重复抛弃安全")]
+    public void AbandonIsIdempotent()
+    {
+        var tracer = new DefaultTracer();
+
+        var span = tracer.NewSpan("http-404");
+        span.Abandon();
+        span.Abandon();
+        span.Dispose();
+
+        Assert.Null(DefaultSpan.Current);
+
+        // 抛弃的埋点不产生统计
+        var builders = tracer.TakeAll();
+        Assert.DoesNotContain(builders, e => e.Name == "http-404");
+    }
+
+    [Fact]
+    public void TestTraceId()
+    {
+        var span = new DefaultSpan();
+        span.Start();
+
+        Assert.NotEmpty(span.TraceId);
+    }
+
+    [Fact]
+    public void HttpRequestMessageUriTest()
+    {
+        var tracer = new DefaultTracer();
+
         {
-            var tracer = new DefaultTracer();
+            var url = "http://sso.newlifex.com/user/query?id=12345";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var span = tracer.NewSpan(request) as DefaultSpan;
 
-            // 内嵌片段，应该共用TraceId
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-                {
-                    Assert.Equal(span, DefaultSpan.Current);
-
-                    using var span2 = tracer.NewSpan("test2");
-                    Assert.Equal(span2, DefaultSpan.Current);
-
-                    Assert.Equal(span.TraceId, span2.TraceId);
-                    Assert.Equal(span.Id, span2.ParentId);
-                    Assert.NotEqual(span.Id, span2.Id);
-
-                    Thread.Sleep(100);
-                    {
-                        using var span3 = tracer.NewSpan("test3");
-                        Assert.Equal(span3, DefaultSpan.Current);
-
-                        Assert.Equal(span.TraceId, span3.TraceId);
-                        Assert.Equal(span2.Id, span3.ParentId);
-                        Assert.NotEqual(span2.Id, span3.Id);
-
-                        // 检查强制采样
-                        var ds1 = span as DefaultSpan;
-                        var ds2 = span2 as DefaultSpan;
-                        var ds3 = span3 as DefaultSpan;
-
-                        Assert.Equal(1, ds1.TraceFlag);
-                        Assert.Equal(1, ds2.TraceFlag);
-                        Assert.Equal(1, ds3.TraceFlag);
-                    }
-
-                    Assert.Equal(span2, DefaultSpan.Current);
-                }
-
-                Assert.Equal(span, DefaultSpan.Current);
-            }
-
-            // 内嵌片段，不同线程应该使用不同TraceId
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-
-                // 另一个线程建立span，必须用UnsafeQueueUserWorkItem截断上下文传递，否则还是会建立父子关系
-                ISpan span2 = null;
-                var e = new AutoResetEvent(false);
-                ThreadPool.UnsafeQueueUserWorkItem(s =>
-                {
-                    span2 = tracer.NewSpan("test2");
-                    e.Set();
-                }, null);
-                //Thread.Sleep(100);
-                e.WaitOne();
-
-                //using var span2 = Task.Factory.StartNew(() => tracer.NewSpan("test2"), TaskCreationOptions.LongRunning).Result;
-                Assert.NotEqual(span.TraceId, span2.TraceId);
-                Assert.NotEqual(span.Id, span2.ParentId);
-                span2.Dispose();
-
-                // 检查强制采样
-                var ds1 = span as DefaultSpan;
-                var ds2 = span2 as DefaultSpan;
-
-                Assert.Equal(0, ds1.TraceFlag);
-                Assert.Equal(0, ds2.TraceFlag);
-            }
-
-            var builder = tracer.BuildSpan("test");
-            Assert.Equal(2, builder.Total);
-            Assert.Equal(0, builder.Errors);
+            Assert.Equal("http://sso.newlifex.com/user/query", span.Name);
+            Assert.StartsWith("GET http://sso.newlifex.com/user/query?id=12345", span.Tag);
         }
 
-        [Fact]
-        public void TestParentId()
         {
-            var tracer = new DefaultTracer();
+            var url = "user/query?id=12345";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var span = tracer.NewSpan(request) as DefaultSpan;
 
-            // QueueUserWorkItem传递上下文
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-
-                // 另一个线程建立span
-                ISpan span2 = null;
-                var e = new AutoResetEvent(false);
-                ThreadPool.QueueUserWorkItem(s =>
-                {
-                    span2 = tracer.NewSpan("test2");
-                    e.Set();
-                }, null);
-                //Thread.Sleep(100);
-                e.WaitOne();
-
-                Assert.Equal(span.TraceId, span2.TraceId);
-                Assert.Equal(span.Id, span2.ParentId);
-                span2.Dispose();
-            }
-
-            // Task传递上下文
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-
-                // 另一个线程建立span
-                using var span2 = Task.Run(() => tracer.NewSpan("test2")).Result;
-                Assert.Equal(span.TraceId, span2.TraceId);
-                Assert.Equal(span.Id, span2.ParentId);
-            }
-
-            // Task传递上下文
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-
-                // 另一个线程建立span
-                using var span2 = Task.Factory.StartNew(() => tracer.NewSpan("test2"), TaskCreationOptions.LongRunning).Result;
-                Assert.Equal(span.TraceId, span2.TraceId);
-                Assert.Equal(span.Id, span2.ParentId);
-            }
-
-            var builder = tracer.BuildSpan("test");
-            Assert.Equal(3, builder.Total);
-            Assert.Equal(0, builder.Errors);
-
-            builder = tracer.BuildSpan("test2");
-            Assert.Equal(3, builder.Total);
-            Assert.Equal(0, builder.Errors);
+            Assert.Equal("user/query", span.Name);
+            Assert.StartsWith("GET user/query?id=12345", span.Tag);
         }
+    }
 
-        [Fact]
-        public void TestError()
+    [Fact]
+    public void WebRequestUriTest()
+    {
+        var tracer = new DefaultTracer();
+
         {
-            var tracer = new DefaultTracer();
+            var url = "http://sso.newlifex.com/user/query?id=12345";
+#pragma warning disable SYSLIB0014 // 类型或成员已过时
+            var request = WebRequest.CreateHttp(url);
+#pragma warning restore SYSLIB0014 // 类型或成员已过时
+            var span = tracer.NewSpan(request) as DefaultSpan;
 
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-                {
-                    using var span2 = tracer.NewSpan("test");
-                    Thread.Sleep(200);
-
-                    span2.SetError(new Exception("My Error"), null);
-                }
-            }
-
-            var builder = tracer.BuildSpan("test");
-            Assert.Equal(2, builder.Total);
-            Assert.Equal(1, builder.Errors);
-            Assert.True(builder.Cost >= 100 + 200);
-            Assert.True(builder.MaxCost >= 200);
+            Assert.Equal("http://sso.newlifex.com/user/query", span.Name);
+            Assert.Equal("GET http://sso.newlifex.com/user/query?id=12345", span.Tag);
         }
 
-        [Fact]
-        public async void TestHttpClient()
-        {
-            var tracer = new DefaultTracer();
+        //{
+        //    var url = "user/query?id=12345";
+        //    var request = WebRequest.CreateHttp(new Uri(url, UriKind.RelativeOrAbsolute));
+        //    var span = tracer.NewSpan(request) as DefaultSpan;
 
-            var http = tracer.CreateHttpClient();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("tracer_test v1.3");
-
-            await http.GetStringAsync("https://newlifex.com?id=1234");
-            await Assert.ThrowsAnyAsync<Exception>(async () =>
-            {
-                // 故意写错地址，让它抛出异常
-                await http.GetStringAsync("https://www.newlifexxx.com/notfound?name=stone");
-            });
-
-            // 取出全部跟踪数据
-            var bs = tracer.TakeAll();
-            var keys = bs.Select(e => e.Name).ToArray();
-            Assert.Equal(2, bs.Length);
-            Assert.Contains("https://newlifex.com/", keys);
-            Assert.Contains("https://www.newlifexxx.com/notfound", keys);
-
-            // 其中一项
-            var builder = bs.FirstOrDefault(e => e.Name == "https://www.newlifexxx.com/notfound");
-            Assert.Equal(1, builder.Total);
-            Assert.Equal(1, builder.Errors);
-
-            var span = builder.ErrorSamples[0];
-            //Assert.Equal("tracer_test v1.3", span.Tag);
-            Assert.StartsWith("GET https://www.newlifexxx.com/notfound?name=stone", span.Tag);
-        }
-
-        [Fact]
-        public void TestJson()
-        {
-            var tracer = new DefaultTracer();
-
-            {
-                using var span = tracer.NewSpan("test");
-                Thread.Sleep(100);
-                {
-                    using var span2 = tracer.NewSpan("test2");
-                    Thread.Sleep(200);
-
-                    span2.SetError(new Exception("My Error"), null);
-                }
-            }
-
-            var m = new MyModel { AppId = "Test", Builders = tracer.TakeAll() };
-            var json = m.ToJson();
-
-            var model = json.ToJsonEntity<MyModel>();
-            Assert.NotNull(model);
-            Assert.NotEmpty(model.Builders);
-            Assert.Equal(2, model.Builders.Length);
-            //Assert.Equal("test", model.Builders[0].Name);
-            //Assert.Equal("test2", model.Builders[1].Name);
-            var test2 = model.Builders.First(e => e.Name == "test2");
-            Assert.Equal(1, test2.ErrorSamples.Count);
-        }
-
-        class MyModel
-        {
-            public String AppId { get; set; }
-
-            public ISpanBuilder[] Builders { get; set; }
-        }
-
-        [Fact]
-        public void TestTraceId()
-        {
-            var span = new DefaultSpan();
-            span.Start();
-
-            Assert.NotEmpty(span.TraceId);
-        }
-
-        [Fact]
-        public void HttpRequestMessageUriTest()
-        {
-            var tracer = new DefaultTracer();
-
-            {
-                var url = "http://sso.newlifex.com/user/query?id=12345";
-                var request = new HttpRequestMessage(HttpMethod.Get, url);
-                var span = tracer.NewSpan(request) as DefaultSpan;
-
-                Assert.Equal("http://sso.newlifex.com/user/query", span.Builder.Name);
-                Assert.StartsWith("GET http://sso.newlifex.com/user/query?id=12345", span.Tag);
-            }
-
-            {
-                var url = "user/query?id=12345";
-                var request = new HttpRequestMessage(HttpMethod.Get, url);
-                var span = tracer.NewSpan(request) as DefaultSpan;
-
-                Assert.Equal("user/query", span.Builder.Name);
-                Assert.StartsWith("GET user/query?id=12345", span.Tag);
-            }
-        }
-
-        [Fact]
-        public void WebRequestUriTest()
-        {
-            var tracer = new DefaultTracer();
-
-            {
-                var url = "http://sso.newlifex.com/user/query?id=12345";
-                var request = WebRequest.CreateHttp(url);
-                var span = tracer.NewSpan(request) as DefaultSpan;
-
-                Assert.Equal("http://sso.newlifex.com/user/query", span.Builder.Name);
-                Assert.Equal("GET http://sso.newlifex.com/user/query?id=12345", span.Tag);
-            }
-
-            //{
-            //    var url = "user/query?id=12345";
-            //    var request = WebRequest.CreateHttp(new Uri(url, UriKind.RelativeOrAbsolute));
-            //    var span = tracer.NewSpan(request) as DefaultSpan;
-
-            //    Assert.Equal("http://sso.newlifex.com/user/query", span.Builder.Name);
-            //    Assert.Equal("/user/query?id=12345", span.Tag);
-            //}
-        }
+        //    Assert.Equal("http://sso.newlifex.com/user/query", span.Name);
+        //    Assert.Equal("/user/query?id=12345", span.Tag);
+        //}
     }
 }

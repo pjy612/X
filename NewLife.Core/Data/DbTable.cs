@@ -1,196 +1,296 @@
-﻿using System.Collections;
+﻿using System.Buffers;
+using System.Collections;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
+using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Xml;
 using System.Xml.Serialization;
+using NewLife.Buffers;
 using NewLife.IO;
 using NewLife.Reflection;
 using NewLife.Serialization;
 
-namespace NewLife.Data
+namespace NewLife.Data;
+
+/// <summary>数据表</summary>
+/// <remarks>
+/// 文档 https://newlifex.com/core/dbtable
+/// </remarks>
+public class DbTable : IEnumerable<DbRow>, ICloneable, IAccessor, ISpanSerializable
 {
-    /// <summary>数据表</summary>
-    /// <remarks>
-    /// 文档 https://newlifex.com/core/dbtable
-    /// </remarks>
-    public class DbTable : IEnumerable<DbRow>, ICloneable, IAccessor
+    #region 属性
+    /// <summary>数据列</summary>
+    public String[] Columns { get; set; } = [];
+
+    /// <summary>数据列类型</summary>
+    [XmlIgnore, IgnoreDataMember]
+    public Type[] Types { get; set; } = [];
+
+    /// <summary>数据行</summary>
+    public IList<Object?[]> Rows { get; set; } = [];
+
+    /// <summary>总行数</summary>
+    public Int32 Total { get; set; }
+    #endregion
+
+    #region 构造
+    #endregion
+
+    #region 从数据库读取
+    /// <summary>读取数据</summary>
+    /// <param name="dr"></param>
+    public void Read(IDataReader dr)
     {
-        #region 属性
-        /// <summary>数据列</summary>
-        public String[] Columns { get; set; }
+        ReadHeader(dr);
+        ReadData(dr);
+    }
 
-        /// <summary>数据列类型</summary>
-        [XmlIgnore, IgnoreDataMember]
-        public Type[] Types { get; set; }
+    /// <summary>读取头部</summary>
+    /// <param name="dr"></param>
+    public void ReadHeader(IDataReader dr)
+    {
+        var count = dr.FieldCount;
 
-        /// <summary>数据行</summary>
-        public IList<Object[]> Rows { get; set; }
-
-        /// <summary>总行数</summary>
-        public Int32 Total { get; set; }
-        #endregion
-
-        #region 构造
-        #endregion
-
-        #region 从数据库读取
-        /// <summary>读取数据</summary>
-        /// <param name="dr"></param>
-        public void Read(IDataReader dr)
+        // 字段
+        var cs = new String[count];
+        var ts = new Type[count];
+        for (var i = 0; i < count; i++)
         {
-            ReadHeader(dr);
-            ReadData(dr);
+            cs[i] = dr.GetName(i);
+            ts[i] = dr.GetFieldType(i);
         }
+        Columns = cs;
+        Types = ts;
+    }
 
-        /// <summary>读取头部</summary>
-        /// <param name="dr"></param>
-        public void ReadHeader(IDataReader dr)
+    /// <summary>读取数据</summary>
+    /// <param name="dr">数据读取器</param>
+    /// <param name="fields">要读取的字段序列（将目标列 i 映射到数据读取器列 fields[i]）</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "探测读取器实现的可选快速路径（TakeValues），读取器类型为运行时来源；未命中即回退逐列读取")]
+    public void ReadData(IDataReader dr, Int32[]? fields = null)
+    {
+        // 字段
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+
+        // 在SqlServer中，fields可能是空数组
+        //fields ??= Enumerable.Range(0, cs.Length).ToArray();
+        if (fields == null || fields.Length == 0)
+            fields = Enumerable.Range(0, cs.Length).ToArray();
+
+        // 检测读取器是否支持 TakeValues 快速读取（如 NewLife.MySql 等特殊读取器）
+        // 仅在顺序映射（fields[i]==i）时可直接窃取行数组，无需新建 Object?[] 也无需逐列索引
+        Func<Object?[]?>? takeValues = null;
+        if (fields.Length == ts.Length)
         {
-            var count = dr.FieldCount;
-
-            // 字段
-            var cs = new String[count];
-            var ts = new Type[count];
-            for (var i = 0; i < count; i++)
+            var tvMethod = dr.GetType().GetMethod("TakeValues", Type.EmptyTypes);
+            if (tvMethod != null)
             {
-                cs[i] = dr.GetName(i);
-                ts[i] = dr.GetFieldType(i);
+                var isIdentity = true;
+                for (var i = 0; i < fields.Length; i++)
+                {
+                    if (fields[i] != i) { isIdentity = false; break; }
+                }
+                if (isIdentity)
+                    takeValues = tvMethod.As<Func<Object?[]?>>(dr);
             }
-            Columns = cs;
-            Types = ts;
         }
 
-        /// <summary>读取数据</summary>
-        /// <param name="dr">数据读取器</param>
-        /// <param name="fields">要读取的字段序列</param>
-        public void ReadData(IDataReader dr, Int32[] fields = null)
+        // 数据
+        var rs = new List<Object?[]>();
+        if (takeValues != null)
         {
-            // 字段
-            var cs = Columns;
-            var ts = Types;
-
-            fields ??= Enumerable.Range(0, cs.Length).ToArray();
-
-            // 数据
-            var rs = new List<Object[]>();
             while (dr.Read())
             {
-                var row = new Object[fields.Length];
+                var row = takeValues();
+                if (row == null) continue;
+
+                // 原地修复 DBNull，按目标列类型填充默认值
+                for (var i = 0; i < ts.Length && i < row.Length; i++)
+                {
+                    if (row[i] == DBNull.Value)
+                        row[i] = GetDefault(ts[i].GetTypeCode());
+                }
+                rs.Add(row!);
+            }
+        }
+        else
+        {
+            while (dr.Read())
+            {
+                var row = new Object?[fields.Length];
                 for (var i = 0; i < fields.Length; i++)
                 {
                     // MySql在读取0000时间数据时会报错
                     try
                     {
-                        var val = dr[fields[i]];
+                        var idx = fields[i];
+                        var val = dr[idx];
 
-                        if (val == DBNull.Value) val = GetDefault(ts[i].GetTypeCode());
+                        if (val == DBNull.Value)
+                        {
+                            // 按目标列 i 的类型填充默认值
+                            val = GetDefault(ts[i].GetTypeCode());
+                        }
                         row[i] = val;
                     }
                     catch { }
                 }
                 rs.Add(row);
             }
-            Rows = rs;
+        }
+        Rows = rs;
 
-            Total = rs.Count;
+        Total = rs.Count;
+    }
+
+    /// <summary>读取数据</summary>
+    /// <param name="dr"></param>
+    /// <param name="cancellationToken">取消通知</param>
+    public async Task ReadAsync(DbDataReader dr, CancellationToken cancellationToken = default)
+    {
+        ReadHeader(dr);
+        await ReadDataAsync(dr, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>读取数据</summary>
+    /// <param name="dr">数据读取器</param>
+    /// <param name="fields">要读取的字段序列（将目标列 i 映射到数据读取器列 fields[i]）</param>
+    /// <param name="cancellationToken">取消通知</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "探测读取器实现的可选快速路径（TakeValues），读取器类型为运行时来源；未命中即回退逐列读取")]
+    public async Task ReadDataAsync(DbDataReader dr, Int32[]? fields = null, CancellationToken cancellationToken = default)
+    {
+        // 字段
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+
+        fields ??= Enumerable.Range(0, cs.Length).ToArray();
+
+        // 检测读取器是否支持 TakeValues 快速读取（如 NewLife.MySql 等特殊读取器）
+        Func<Object?[]?>? takeValues = null;
+        if (fields.Length == ts.Length)
+        {
+            var tvMethod = dr.GetType().GetMethod("TakeValues", Type.EmptyTypes);
+            if (tvMethod != null)
+            {
+                var isIdentity = true;
+                for (var i = 0; i < fields.Length; i++)
+                {
+                    if (fields[i] != i) { isIdentity = false; break; }
+                }
+                if (isIdentity)
+                    takeValues = tvMethod.As<Func<Object?[]?>>(dr);
+            }
         }
 
-        /// <summary>读取数据</summary>
-        /// <param name="dr"></param>
-        /// <param name="cancellationToken">取消通知</param>
-        public async Task ReadAsync(DbDataReader dr, CancellationToken cancellationToken = default)
+        // 数据
+        var rs = new List<Object?[]>();
+        if (takeValues != null)
         {
-            ReadHeader(dr);
-            await ReadDataAsync(dr, null, cancellationToken);
-        }
-
-        /// <summary>读取数据</summary>
-        /// <param name="dr">数据读取器</param>
-        /// <param name="fields">要读取的字段序列</param>
-        /// <param name="cancellationToken">取消通知</param>
-        public async Task ReadDataAsync(DbDataReader dr, Int32[] fields = null, CancellationToken cancellationToken = default)
-        {
-            // 字段
-            var cs = Columns;
-            var ts = Types;
-
-            fields ??= Enumerable.Range(0, cs.Length).ToArray();
-
-            // 数据
-            var rs = new List<Object[]>();
             while (await dr.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                var row = new Object[fields.Length];
+                var row = takeValues();
+                if (row == null) continue;
+
+                for (var i = 0; i < ts.Length && i < row.Length; i++)
+                {
+                    if (row[i] == DBNull.Value)
+                        row[i] = GetDefault(ts[i].GetTypeCode());
+                }
+                rs.Add(row!);
+            }
+        }
+        else
+        {
+            while (await dr.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var row = new Object?[fields.Length];
                 for (var i = 0; i < fields.Length; i++)
                 {
                     // MySql在读取0000时间数据时会报错
                     try
                     {
-                        var val = dr[fields[i]];
+                        var idx = fields[i];
+                        var val = dr[idx];
 
-                        if (val == DBNull.Value) val = GetDefault(ts[i].GetTypeCode());
+                        if (val == DBNull.Value)
+                        {
+                            // 按目标列 i 的类型填充默认值
+                            val = GetDefault(ts[i].GetTypeCode());
+                        }
                         row[i] = val;
                     }
                     catch { }
                 }
                 rs.Add(row);
             }
-            Rows = rs;
-
-            Total = rs.Count;
         }
-        #endregion
+        Rows = rs;
 
-        #region DataTable互转
-        /// <summary>从DataTable读取数据</summary>
-        /// <param name="dataTable">数据表</param>
-        public Int32 Read(DataTable dataTable)
+        Total = rs.Count;
+    }
+    #endregion
+
+    #region DataTable互转
+    /// <summary>从DataTable读取数据</summary>
+    /// <param name="dataTable">数据表</param>
+    public Int32 Read(DataTable dataTable)
+    {
+        if (dataTable == null) throw new ArgumentNullException(nameof(dataTable));
+
+        var cs = new List<String>();
+        var ts = new List<Type>();
+        foreach (var item in dataTable.Columns)
         {
-            if (dataTable == null) throw new ArgumentNullException(nameof(dataTable));
-
-            var cs = new List<String>();
-            var ts = new List<Type>();
-            foreach (DataColumn dc in dataTable.Columns)
+            if (item is DataColumn dc)
             {
                 cs.Add(dc.ColumnName);
                 ts.Add(dc.DataType);
             }
-            Columns = cs.ToArray();
-            Types = ts.ToArray();
+        }
+        Columns = cs.ToArray();
+        Types = ts.ToArray();
 
-            var rs = new List<Object[]>();
-            foreach (DataRow dr in dataTable.Rows)
-            {
+        var rs = new List<Object?[]>();
+        foreach (var item in dataTable.Rows)
+        {
+            if (item is DataRow dr)
                 rs.Add(dr.ItemArray);
-            }
-            Rows = rs;
+        }
+        Rows = rs;
+        Total = rs.Count;
 
-            return rs.Count;
+        return rs.Count;
+    }
+
+    /// <summary>转换为DataTable</summary>
+    /// <returns></returns>
+    public DataTable ToDataTable() => Write(new DataTable());
+
+    /// <summary>转换为DataTable</summary>
+    /// <param name="dataTable">数据表</param>
+    /// <returns></returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2062", Justification = "DataColumn 类型来自目标数据表结构，运行时可知；本方法不做模型成员反射")]
+    public DataTable Write(DataTable dataTable)
+    {
+        if (dataTable == null) throw new ArgumentNullException(nameof(dataTable));
+
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+
+        for (var i = 0; i < cs.Length; i++)
+        {
+            var dc = new DataColumn(cs[i], ts[i]);
+
+            dataTable.Columns.Add(dc);
         }
 
-        /// <summary>转换为DataTable</summary>
-        /// <returns></returns>
-        public DataTable ToDataTable() => Write(new DataTable());
-
-        /// <summary>转换为DataTable</summary>
-        /// <param name="dataTable">数据表</param>
-        /// <returns></returns>
-        public DataTable Write(DataTable dataTable)
+        var rs = Rows;
+        if (rs != null)
         {
-            if (dataTable == null) throw new ArgumentNullException(nameof(dataTable));
-
-            var cs = Columns;
-            var ts = Types;
-            for (var i = 0; i < cs.Length; i++)
-            {
-                var dc = new DataColumn(cs[i], ts[i]);
-
-                dataTable.Columns.Add(dc);
-            }
-
-            var rs = Rows;
             for (var i = 0; i < rs.Count; i++)
             {
                 var dr = dataTable.NewRow();
@@ -198,560 +298,912 @@ namespace NewLife.Data
 
                 dataTable.Rows.Add(dr);
             }
-
-            return dataTable;
-        }
-        #endregion
-
-        #region 二进制读取
-        private const Byte _Ver = 2;
-
-        /// <summary>从数据流读取</summary>
-        /// <param name="stream"></param>
-        public void Read(Stream stream)
-        {
-            var bn = new Binary
-            {
-                EncodeInt = true,
-                Stream = stream,
-            };
-
-            // 读取头部
-            ReadHeader(bn);
-
-            // 读取全部数据
-            ReadData(bn, Total);
         }
 
-        /// <summary>读取头部</summary>
-        /// <param name="bn"></param>
-        public void ReadHeader(Binary bn)
+        return dataTable;
+    }
+    #endregion
+
+    #region 二进制读取
+    private const Byte _Ver = 3;
+    private const String MAGIC = "NewLifeDbTable";
+
+    /// <summary>创建二进制序列化器</summary>
+    /// <param name="stream">数据流</param>
+    /// <returns></returns>
+    public Binary CreateBinary(Stream stream) => new(stream) { FullTime = true, EncodeInt = true };
+
+    /// <summary>从数据流读取</summary>
+    /// <param name="stream"></param>
+    public Int64 Read(Stream stream)
+    {
+        var bn = CreateBinary(stream);
+
+        // 读取头部
+        var rs = ReadHeader(bn);
+
+        // 读取全部数据
+        rs += ReadData(bn, Total);
+
+        return rs;
+    }
+
+    /// <summary>读取头部。获取列名、类型和行数等信息</summary>
+    /// <param name="binary">二进制序列化器</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "类型名来自数据头描述，属运行时加载；AOT 下目标类型若被静态引用或声明上下文则可用")]
+    public Int64 ReadHeader(Binary binary)
+    {
+        var pStart = binary.Total;
+
+        // 头部，幻数、版本和标记
+        var magic = binary.ReadBytes(MAGIC.Length).ToStr();
+        if (magic != MAGIC) throw new InvalidDataException();
+
+        var ver = binary.Read<Byte>();
+        _ = binary.Read<Byte>();
+
+        // 版本兼容
+        if (ver > _Ver) throw new InvalidDataException(L.T("DbTable[ver={0}] Unable to support newer versions [{1}]", _Ver, ver));
+
+        // v3开始支持FullTime
+        if (ver < 3) binary.FullTime = false;
+
+        // 读取头部
+        var count = binary.Read<Int32>();
+        var cs = new String[count];
+        var ts = new Type[count];
+        for (var i = 0; i < count; i++)
         {
-            // 头部，幻数、版本和标记
-            var magic = bn.ReadBytes(14).ToStr();
-            if (magic != "NewLifeDbTable") throw new InvalidDataException();
+            cs[i] = binary.Read<String>() + "";
 
-            var ver = bn.Read<Byte>();
-            _ = bn.Read<Byte>();
-
-            // 版本兼容
-            if (ver > _Ver) throw new InvalidDataException($"DbTable[ver={_Ver}]无法支持较新的版本[{ver}]");
-
-            // 读取头部
-            var count = bn.Read<Int32>();
-            var cs = new String[count];
-            var ts = new Type[count];
-            for (var i = 0; i < count; i++)
-            {
-                cs[i] = bn.Read<String>();
-
-                // 复杂类型写入类型字符串
-                var tc = (TypeCode)bn.Read<Byte>();
-                if (tc != TypeCode.Object)
-                    ts[i] = Type.GetType("System." + tc);
-                else if (ver >= 2)
-                    ts[i] = Type.GetType(bn.Read<String>());
-            }
-            Columns = cs;
-            Types = ts;
-
-            Total = bn.ReadBytes(4).ToInt();
+            // 复杂类型写入类型字符串
+            var tc = (TypeCode)binary.Read<Byte>();
+            if (tc != TypeCode.Object)
+                ts[i] = TypeCodeHelper.GetType(tc) ?? typeof(Object);
+            else if (ver >= 2)
+                ts[i] = Type.GetType(binary.Read<String>() + "") ?? typeof(Object);
         }
+        Columns = cs;
+        Types = ts;
 
-        /// <summary>读取数据</summary>
-        /// <param name="bn"></param>
-        /// <param name="rows"></param>
-        /// <returns></returns>
-        public void ReadData(Binary bn, Int32 rows)
+        // 行数按小端写入（历史格式），显式按小端读取，避免大端主机把 3 读成 0x03000000
+        var totalBytes = binary.ReadBytes(4);
+        Total = totalBytes[0] | totalBytes[1] << 8 | totalBytes[2] << 16 | totalBytes[3] << 24;
+
+        return binary.Total - pStart;
+    }
+
+    /// <summary>读取数据</summary>
+    /// <param name="binary">二进制序列化器</param>
+    /// <param name="rows">行数</param>
+    /// <returns></returns>
+    public Int64 ReadData(Binary binary, Int32 rows)
+    {
+        if (rows <= 0) return 0;
+
+        var pStart = binary.Total;
+
+        Rows = ReadRows(binary, rows).ToList();
+
+        return binary.Total - pStart;
+    }
+
+    /// <summary>使用迭代器模式读取行数据。调用者可以一边读取一边处理数据</summary>
+    /// <param name="binary">二进制序列化器</param>
+    /// <param name="rows">行数。传入-1时，循环遍历数据流</param>
+    /// <returns></returns>
+    /// <exception cref="ArgumentNullException"></exception>
+    public IEnumerable<Object?[]> ReadRows(Binary binary, Int32 rows)
+    {
+        if (rows == 0) yield break;
+
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+        if (rows > 0)
         {
-            if (rows <= 0) return;
-
-            var ts = Types;
-            var rs = new List<Object[]>(rows);
             for (var k = 0; k < rows; k++)
             {
-                var row = new Object[ts.Length];
+                var row = new Object?[ts.Length];
                 for (var i = 0; i < ts.Length; i++)
                 {
-                    row[i] = bn.Read(ts[i]);
+                    row[i] = binary.Read(ts[i]);
                 }
-                rs.Add(row);
+                yield return row;
             }
-            Rows = rs;
         }
-
-        /// <summary>读取</summary>
-        /// <param name="pk"></param>
-        /// <returns></returns>
-        public Boolean Read(Packet pk)
+        else
         {
-            if (pk == null || pk.Total == 0) return false;
-
-            Read(pk.GetStream());
-
-            return true;
-        }
-
-        /// <summary>从文件加载</summary>
-        /// <param name="file"></param>
-        /// <param name="compressed">是否压缩</param>
-        /// <returns></returns>
-        public Int64 LoadFile(String file, Boolean compressed = false) => file.AsFile().OpenRead(compressed, s => Read(s));
-
-        Boolean IAccessor.Read(Stream stream, Object context) { Read(stream); return true; }
-        #endregion
-
-        #region 二进制写入
-        /// <summary>写入数据流</summary>
-        /// <param name="stream"></param>
-        public void Write(Stream stream)
-        {
-            var bn = new Binary
+            while (!binary.EndOfStream)
             {
-                EncodeInt = true,
-                Stream = stream,
-            };
-
-            // 写入数据体
-            var rs = Rows;
-            if (Total == 0 && rs != null) Total = rs.Count;
-
-            // 写入头部
-            WriteHeader(bn);
-
-            // 写入数据行
-            WriteData(bn);
-        }
-
-        /// <summary>写入头部到数据流</summary>
-        /// <param name="bn"></param>
-        public void WriteHeader(Binary bn)
-        {
-            var cs = Columns;
-            var ts = Types;
-
-            // 头部，幻数、版本和标记
-            bn.Write("NewLifeDbTable".GetBytes(), 0, 14);
-            bn.Write(_Ver);
-            bn.Write(0);
-
-            // 写入头部
-            var count = cs.Length;
-            bn.Write(count);
-            for (var i = 0; i < count; i++)
-            {
-                bn.Write(cs[i]);
-
-                // 复杂类型写入类型字符串
-                var code = ts[i].GetTypeCode();
-                bn.Write((Byte)code);
-                if (code == TypeCode.Object) bn.Write(ts[i].FullName);
-            }
-
-            // 数据行数
-            bn.Write(Total.GetBytes(), 0, 4);
-        }
-
-        /// <summary>写入数据部分到数据流</summary>
-        /// <param name="bn"></param>
-        public void WriteData(Binary bn)
-        {
-            var ts = Types;
-            var rs = Rows;
-
-            // 写入数据
-            foreach (var row in rs)
-            {
-                for (var i = 0; i < row.Length; i++)
+                var row = new Object?[ts.Length];
+                for (var i = 0; i < ts.Length; i++)
                 {
-                    bn.Write(row[i], ts[i]);
+                    row[i] = binary.Read(ts[i]);
                 }
+                yield return row;
+            }
+        }
+    }
+
+    /// <summary>读取</summary>
+    /// <param name="pk"></param>
+    /// <returns></returns>
+    public Boolean Read(IPacket pk)
+    {
+        if (pk == null || pk.Length == 0) return false;
+
+        Read(pk.GetStream(false));
+
+        return true;
+    }
+
+    /// <summary>读取</summary>
+    /// <param name="buffer"></param>
+    /// <param name="offset"></param>
+    /// <param name="count"></param>
+    /// <returns></returns>
+    public Boolean Read(Byte[] buffer, Int32 offset = 0, Int32 count = -1)
+    {
+        if (count < 0) count = buffer.Length - offset;
+
+        var ms = new MemoryStream(buffer, offset, count);
+        Read(ms);
+
+        return true;
+    }
+
+    /// <summary>从文件加载</summary>
+    /// <param name="file">文件路径</param>
+    /// <param name="compressed">是否压缩</param>
+    /// <returns></returns>
+    public Int64 LoadFile(String file, Boolean compressed = false) => file.AsFile().OpenRead(compressed, s => Read(s));
+
+    /// <summary>使用迭代器模式加载文件数据。调用者可以一边读取一边处理数据</summary>
+    /// <param name="file">文件路径。gz文件自动使用压缩</param>
+    /// <returns></returns>
+    /// <exception cref="ArgumentNullException"></exception>
+    public IEnumerable<Object?[]> LoadRows(String file)
+    {
+        if (file.IsNullOrEmpty()) throw new ArgumentNullException(nameof(file));
+
+        using var fs = file.AsFile().OpenRead();
+        var bn = CreateBinary(fs);
+
+        // 解压缩
+        if (file.EndsWithIgnoreCase(".gz"))
+            bn.Stream = new GZipStream(fs, CompressionMode.Decompress);
+
+        ReadHeader(bn);
+
+        // 有些场景生成db文件时，无法在开始写入长度。
+        var rows = Total;
+        if (rows == 0 && fs.Length > 0) rows = -1;
+
+        return ReadRows(bn, rows);
+    }
+
+    Boolean IAccessor.Read(Stream stream, Object? context)
+    {
+        Read(stream);
+        return true;
+    }
+    #endregion
+
+    #region 二进制写入
+    /// <summary>写入数据流</summary>
+    /// <param name="stream"></param>
+    public Int64 Write(Stream stream)
+    {
+        var bn = CreateBinary(stream);
+
+        // 写入数据体
+        var rs = Rows;
+        if (Total == 0 && rs != null) Total = rs.Count;
+
+        // 写入头部
+        var bs = WriteHeader(bn);
+
+        // 写入数据行
+        bs += WriteData(bn);
+
+        return bs;
+    }
+
+    /// <summary>写入头部到数据流</summary>
+    /// <param name="binary">二进制序列化器</param>
+    public Int64 WriteHeader(Binary binary)
+    {
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+
+        var pStart = binary.Total;
+
+        // 头部，幻数、版本和标记
+        var buf = MAGIC.GetBytes();
+        binary.Write(buf, 0, buf.Length);
+        binary.Write(_Ver);
+        binary.Write(0);
+
+        // 写入头部
+        var count = cs.Length;
+        binary.Write(count);
+        for (var i = 0; i < count; i++)
+        {
+            binary.Write(cs[i]);
+
+            // 复杂类型写入类型字符串
+            var code = ts[i].GetTypeCode();
+            binary.Write((Byte)code);
+            if (code == TypeCode.Object) binary.Write(ts[i].FullName);
+        }
+
+        // 数据行数
+        binary.Write(Total.GetBytes(), 0, 4);
+
+        return binary.Total - pStart;
+    }
+
+    /// <summary>写入数据部分到数据流</summary>
+    /// <param name="binary">二进制序列化器</param>
+    public Int64 WriteData(Binary binary)
+    {
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+        var rs = Rows;
+        if (rs == null) return 0;
+
+        var pStart = binary.Total;
+
+        // 写入数据
+        foreach (var row in rs)
+        {
+            for (var i = 0; i < row.Length; i++)
+            {
+                binary.Write(row[i], ts[i]);
             }
         }
 
-        /// <summary>写入数据部分到数据流</summary>
-        /// <param name="bn"></param>
-        /// <param name="fields">要写入的字段序列</param>
-        public void WriteData(Binary bn, Int32[] fields)
-        {
-            var ts = Types;
-            var rs = Rows;
+        return binary.Total - pStart;
+    }
 
-            // 写入数据，按照指定的顺序
-            foreach (var row in rs)
+    /// <summary>写入数据部分到数据流</summary>
+    /// <param name="binary">二进制序列化器</param>
+    /// <param name="fields">要写入的字段序列（目标列 i 对应源行列索引 fields[i]。-1 表示写入空值）</param>
+    public Int64 WriteData(Binary binary, Int32[] fields)
+    {
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+        var rs = Rows;
+        if (rs == null) return 0;
+
+        var pStart = binary.Total;
+
+        // 写入数据，按照指定的顺序
+        foreach (var row in rs)
+        {
+            for (var i = 0; i < fields.Length; i++)
             {
-                for (var i = 0; i < fields.Length; i++)
-                {
-                    // 找到目标顺序，实际上几乎不可能出现-1
-                    var idx = fields[i];
-                    if (idx >= 0)
-                        bn.Write(row[idx], ts[idx]);
-                    else
-                        bn.Write(null, ts[idx]);
-                }
+                // 找到目标顺序，实际上几乎不可能出现-1
+                var idx = fields[i];
+                if (idx >= 0)
+                    binary.Write(row[idx], ts[idx]);
+                else
+                    // idx < 0 时写入空值，按目标列 i 的类型写入，避免 ts[-1] 越界。
+                    binary.Write(null, ts[i]);
             }
         }
 
-        /// <summary>转数据包</summary>
-        /// <returns></returns>
-        public Packet ToPacket()
+        return binary.Total - pStart;
+    }
+
+    /// <summary>使用迭代器模式写入数据。调用方可以一边处理数据一边写入</summary>
+    /// <param name="binary">二进制序列化器</param>
+    /// <param name="rows">数据源</param>
+    /// <param name="fields">要写入的字段序列</param>
+    /// <exception cref="ArgumentNullException"></exception>
+    public Int32 WriteRows(Binary binary, IEnumerable<Object?[]> rows, Int32[]? fields = null)
+    {
+        if (rows == null) throw new ArgumentNullException(nameof(rows));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+
+        // 写入数据
+        var count = 0;
+        foreach (var row in rows)
         {
-            var ms = new MemoryStream
-            {
-                Position = 8
-            };
+            WriteRow(binary, row, fields);
 
-            Write(ms);
-
-            ms.Position = 8;
-            return new Packet(ms);
+            count++;
         }
 
-        /// <summary>保存到文件</summary>
-        /// <param name="file"></param>
-        /// <param name="compressed">是否压缩</param>
-        /// <returns></returns>
-        public void SaveFile(String file, Boolean compressed = false) => file.AsFile().OpenWrite(compressed, s => Write(s));
+        return count;
+    }
 
-        Boolean IAccessor.Write(Stream stream, Object context) { Write(stream); return true; }
-        #endregion
+    /// <summary>写入一行数据</summary>
+    /// <param name="binary"></param>
+    /// <param name="row"></param>
+    /// <param name="fields"></param>
+    /// <exception cref="ArgumentNullException"></exception>
+    public Int64 WriteRow(Binary binary, Object?[] row, Int32[]? fields = null)
+    {
+        if (row == null) throw new ArgumentNullException(nameof(row));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
 
-        #region Json序列化
-        /// <summary>转Json字符串</summary>
-        /// <param name="indented">是否缩进。默认false</param>
-        /// <param name="nullValue">是否写空值。默认true</param>
-        /// <param name="camelCase">是否驼峰命名。默认false</param>
-        /// <returns></returns>
-        public String ToJson(Boolean indented = false, Boolean nullValue = true, Boolean camelCase = false)
+        var pStart = binary.Total;
+
+        // 写入数据
+        if (fields == null)
         {
-            // 先转为名值对象的数组，再进行序列化
-            var list = ToDictionary();
-            return list.ToJson(indented, nullValue, camelCase);
+            for (var i = 0; i < row.Length; i++)
+            {
+                binary.Write(row[i], ts[i]);
+            }
+        }
+        else
+        {
+            for (var i = 0; i < fields.Length; i++)
+            {
+                // 找到目标顺序，实际上几乎不可能出现-1
+                var idx = fields[i];
+                if (idx >= 0)
+                    binary.Write(row[idx], ts[idx]);
+                else
+                    // idx < 0 时写入空值，按目标列 i 的类型写入，避免 ts[-1] 越界。
+                    binary.Write(null, ts[i]);
+            }
         }
 
-        /// <summary>转为字典数组形式</summary>
-        /// <returns></returns>
-        public IList<IDictionary<String, Object>> ToDictionary()
+        return binary.Total - pStart;
+    }
+
+    /// <summary>转数据包</summary>
+    /// <returns></returns>
+    public IPacket ToPacket()
+    {
+        var ms = new MemoryStream { Position = 8 };
+        Write(ms);
+
+        ms.Position = 8;
+
+        // 包装为数据包，直接窃取内存流内部的缓冲区
+        return new ArrayPacket(ms);
+    }
+
+    /// <summary>保存到文件</summary>
+    /// <param name="file"></param>
+    /// <param name="compressed">是否压缩</param>
+    /// <returns></returns>
+    public Int64 SaveFile(String file, Boolean compressed = false) => file.AsFile().OpenWrite(compressed, s => Write(s));
+
+    /// <summary>使用迭代器模式写入多行数据到文件。调用者可以一边处理数据一边写入</summary>
+    /// <param name="file">文件路径。gz文件自动使用压缩</param>
+    /// <param name="rows">数据源</param>
+    /// <param name="fields">要写入的字段序列</param>
+    /// <exception cref="ArgumentNullException"></exception>
+    public Int32 SaveRows(String file, IEnumerable<Object?[]> rows, Int32[]? fields = null)
+    {
+        if (file.IsNullOrEmpty()) throw new ArgumentNullException(nameof(file));
+
+        file = file.GetFullPath().EnsureDirectory(true);
+        using var fs = new FileStream(file, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite);
+        var bn = CreateBinary(fs);
+
+        // 压缩。GZipStream 包装 fs，leaveOpen 保持底层流存活，Dispose 时刷出内部缓冲并写入 gzip footer
+        GZipStream? gz = null;
+        if (file.EndsWithIgnoreCase(".gz"))
+            bn.Stream = gz = new GZipStream(fs, CompressionMode.Compress, true);
+
+        WriteHeader(bn);
+        var count = WriteRows(bn, rows, fields);
+
+        // 释放压缩流，确保压缩数据完整写入后，再截掉多余部分
+        gz?.Dispose();
+        fs.SetLength(fs.Position);
+
+        return count;
+    }
+
+    Boolean IAccessor.Write(Stream stream, Object? context)
+    {
+        Write(stream);
+        return true;
+    }
+    #endregion
+
+    #region Json序列化
+    /// <summary>转Json字符串</summary>
+    /// <param name="indented">是否缩进。默认false</param>
+    /// <param name="nullValue">是否写空值。默认true</param>
+    /// <param name="camelCase">是否驼峰命名。默认false</param>
+    /// <returns></returns>
+    public String ToJson(Boolean indented = false, Boolean nullValue = true, Boolean camelCase = false)
+    {
+        // 先转为名值对象的数组，再进行序列化
+        var list = ToDictionary();
+        return list.ToJson(indented, nullValue, camelCase);
+    }
+
+    /// <summary>转为字典数组形式</summary>
+    /// <returns></returns>
+    public IList<IDictionary<String, Object?>> ToDictionary()
+    {
+        var list = new List<IDictionary<String, Object?>>();
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var rows = Rows;
+
+        if (rows != null)
         {
-            var list = new List<IDictionary<String, Object>>();
-            foreach (var row in Rows)
+            foreach (var row in rows)
             {
-                var dic = new Dictionary<String, Object>();
-                for (var i = 0; i < Columns.Length; i++)
+                var dic = new Dictionary<String, Object?>();
+                for (var i = 0; i < cs.Length; i++)
                 {
-                    dic[Columns[i]] = row[i];
+                    dic[cs[i]] = row[i];
                 }
                 list.Add(dic);
             }
-
-            return list;
-        }
-        #endregion
-
-        #region Xml序列化
-        /// <summary>转Xml字符串</summary>
-        /// <returns></returns>
-        public String GetXml()
-        {
-            //var doc = new XmlDocument();
-            //var root = doc.CreateElement("DbTable");
-            //doc.AppendChild(root);
-
-            //foreach (var row in Rows)
-            //{
-            //    var dr = doc.CreateElement("Table");
-            //    for (var i = 0; i < Columns.Length; i++)
-            //    {
-            //        var elm = doc.CreateElement(Columns[i]);
-            //        elm.InnerText = row[i] + "";
-            //        dr.AppendChild(elm);
-            //    }
-            //    root.AppendChild(dr);
-            //}
-
-            //return doc.OuterXml;
-
-            var ms = new MemoryStream();
-            WriteXml(ms).Wait();
-
-            return ms.ToArray().ToStr();
         }
 
-        /// <summary>以Xml格式写入数据流中</summary>
-        /// <param name="stream"></param>
-        public async Task WriteXml(Stream stream)
+        return list;
+    }
+    #endregion
+
+    #region Xml序列化
+    /// <summary>转Xml字符串</summary>
+    /// <returns></returns>
+    public String GetXml()
+    {
+        //var doc = new XmlDocument();
+        //var root = doc.CreateElement("DbTable");
+        //doc.AppendChild(root);
+
+        //foreach (var row in Rows)
+        //{
+        //    var dr = doc.CreateElement("Table");
+        //    for (var i = 0; i < Columns.Length; i++)
+        //    {
+        //        var elm = doc.CreateElement(Columns[i]);
+        //        elm.InnerText = row[i] + "";
+        //        dr.AppendChild(elm);
+        //    }
+        //    root.AppendChild(dr);
+        //}
+
+        //return doc.OuterXml;
+
+        var ms = new MemoryStream();
+        WriteXml(ms).Wait(15_000);
+
+        return ms.ToArray().ToStr();
+    }
+
+    /// <summary>以Xml格式写入数据流中</summary>
+    /// <param name="stream"></param>
+    public async Task WriteXml(Stream stream)
+    {
+        var set = new XmlWriterSettings
         {
-            var set = new XmlWriterSettings
-            {
-                OmitXmlDeclaration = true,
-                Indent = true,
-                Async = true,
-            };
-            using var writer = XmlWriter.Create(stream, set);
+            OmitXmlDeclaration = true,
+            ConformanceLevel = ConformanceLevel.Auto,
+            Indent = true,
+            Async = true,
+        };
+        using var writer = XmlWriter.Create(stream, set);
 
-            await writer.WriteStartDocumentAsync();
-            await writer.WriteStartElementAsync(null, "DbTable", null);
+        await writer.WriteStartDocumentAsync().ConfigureAwait(false);
+        await writer.WriteStartElementAsync(null, "DbTable", null).ConfigureAwait(false);
 
-            foreach (var row in Rows)
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+        var rows = Rows;
+
+        if (rows != null)
+        {
+            foreach (var row in rows)
             {
-                await writer.WriteStartElementAsync(null, "Table", null);
-                for (var i = 0; i < Columns.Length; i++)
+                await writer.WriteStartElementAsync(null, "Table", null).ConfigureAwait(false);
+                for (var i = 0; i < cs.Length; i++)
                 {
-                    //await writer.WriteElementStringAsync(null, Columns[i], null, row[i] + "");
-                    await writer.WriteStartElementAsync(null, Columns[i], null);
+                    await writer.WriteStartElementAsync(null, cs[i], null).ConfigureAwait(false);
 
-                    //writer.WriteValue(row[i]);
-                    if (Types[i] == typeof(Boolean))
-                        writer.WriteValue((Boolean)row[i]);
-                    else if (Types[i] == typeof(DateTime))
-                        writer.WriteValue(new DateTimeOffset((DateTime)row[i]));
-                    else if (Types[i] == typeof(DateTimeOffset))
-                        writer.WriteValue((DateTimeOffset)row[i]);
+                    if (ts[i] == typeof(Boolean))
+                        await writer.WriteStringAsync(XmlConvert.ToString(row[i].ToBoolean())).ConfigureAwait(false);
+                    else if (ts[i] == typeof(DateTime))
+                        await writer.WriteStringAsync(XmlConvert.ToString(row[i].ChangeType<DateTime>(), XmlDateTimeSerializationMode.RoundtripKind)).ConfigureAwait(false);
+                    else if (ts[i] == typeof(DateTimeOffset))
+                        await writer.WriteStringAsync(XmlConvert.ToString(row[i].ChangeType<DateTimeOffset>())).ConfigureAwait(false);
+                    else if (row[i] is IFormattable ft)
+                        await writer.WriteStringAsync(ft + "").ConfigureAwait(false);
                     else
-                        await writer.WriteStringAsync(row[i] + "");
+                        await writer.WriteStringAsync(row[i] + "").ConfigureAwait(false);
 
-                    await writer.WriteEndElementAsync();
+                    await writer.WriteEndElementAsync().ConfigureAwait(false);
                 }
-                await writer.WriteEndElementAsync();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
-
-            await writer.WriteEndElementAsync();
-            await writer.WriteEndDocumentAsync();
-        }
-        #endregion
-
-        #region Csv序列化
-        /// <summary>保存到Csv文件</summary>
-        /// <param name="file"></param>
-        public void SaveCsv(String file)
-        {
-            using var csv = new CsvFile(file, true);
-            csv.WriteLine(Columns);
-            csv.WriteAll(Rows);
         }
 
-        /// <summary>从Csv文件加载</summary>
-        /// <param name="file"></param>
-        public void LoadCsv(String file)
+        await writer.WriteEndElementAsync().ConfigureAwait(false);
+        await writer.WriteEndDocumentAsync().ConfigureAwait(false);
+    }
+    #endregion
+
+    #region Span序列化
+    /// <summary>写入到Span写入器</summary>
+    /// <param name="writer">Span写入器</param>
+    public void Write(ref SpanWriter writer)
+    {
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var ts = Types ?? throw new ArgumentNullException(nameof(Types));
+        var rs = Rows;
+        if (Total == 0 && rs != null) Total = rs.Count;
+
+        // 头部，幻数、版本和标记
+        writer.Write(MAGIC.GetBytes());
+        writer.Write(_Ver);
+        writer.Write((Byte)0);
+
+        // 写入列数
+        var count = cs.Length;
+        writer.WriteEncodedInt(count);
+        // 写入列名和类型
+        for (var i = 0; i < count; i++)
         {
-            using var csv = new CsvFile(file, false);
-            Columns = csv.ReadLine();
-            Rows = csv.ReadAll();
+            writer.Write(cs[i], 0);
+
+            // 复杂类型写入类型字符串
+            var code = ts[i].GetTypeCode();
+            writer.Write((Byte)code);
+            if (code == TypeCode.Object)
+                writer.Write(ts[i].FullName, 0);
         }
-        #endregion
 
-        #region 反射
-        /// <summary>写入模型列表</summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="models"></param>
-        public void WriteModels<T>(IEnumerable<T> models)
+        // 数据行数
+        writer.Write(Total);
+
+        // 写入数据
+        if (rs != null)
         {
-            // 可用属性
-            var pis = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            pis = pis.Where(e => e.PropertyType.GetTypeCode() != TypeCode.Object).ToArray();
-
-            Rows = new List<Object[]>();
-            foreach (var item in models)
+            foreach (var row in rs)
             {
-                // 头部
-                if (Columns == null)
-                {
-                    Columns = pis.Select(e => SerialHelper.GetName(e)).ToArray();
-                    Types = pis.Select(e => e.PropertyType).ToArray();
-                }
-
-                var row = new Object[Columns.Length];
                 for (var i = 0; i < row.Length; i++)
                 {
-                    // 反射取值
-                    if (pis[i].CanRead) row[i] = pis[i].GetValue(item, null);
+                    writer.WriteValue(row[i], ts[i]);
                 }
-                Rows.Add(row);
             }
         }
+    }
 
-        /// <summary>数据表转模型列表。普通反射，便于DAL查询后转任意模型列表</summary>
-        /// <typeparam name="T"></typeparam>
-        /// <returns></returns>
-        public IEnumerable<T> ReadModels<T>()
+    /// <summary>从Span读取器读取</summary>
+    /// <param name="reader">Span读取器</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2057", Justification = "类型名来自数据流格式描述，属运行时加载；AOT 下目标类型若被静态引用或声明上下文则可用")]
+    public void Read(ref SpanReader reader)
+    {
+        // 头部，幻数、版本和标记
+        var magicBytes = reader.ReadBytes(MAGIC.Length);
+        if (!magicBytes.SequenceEqual(MAGIC.GetBytes()))
+            throw new InvalidDataException();
+
+        var ver = reader.ReadByte();
+        _ = reader.ReadByte();
+
+        // 版本兼容
+        if (ver > _Ver) throw new InvalidDataException(L.T("DbTable[ver={0}] Unable to support newer versions [{1}]", _Ver, ver));
+
+        // 读取列数
+        var count = reader.ReadEncodedInt();
+        var cs = new String[count];
+        var ts = new Type[count];
+
+        // 读取列名和类型
+        for (var i = 0; i < count; i++)
         {
-            // 可用属性
-            var pis = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            var dic = pis.ToDictionary(e => SerialHelper.GetName(e), e => e, StringComparer.OrdinalIgnoreCase);
+            cs[i] = reader.ReadString() ?? "";
 
-            foreach (var row in Rows)
+            // 复杂类型写入类型字符串
+            var tc = (TypeCode)reader.ReadByte();
+            if (tc != TypeCode.Object)
+                ts[i] = TypeCodeHelper.GetType(tc) ?? typeof(Object);
+            else if (ver >= 2)
+                ts[i] = Type.GetType(reader.ReadString() ?? "") ?? typeof(Object);
+        }
+        Columns = cs;
+        Types = ts;
+
+        // 读取行数
+        Total = reader.ReadInt32();
+
+        // 读取数据
+        var rs = new List<Object?[]>();
+        for (var k = 0; k < Total; k++)
+        {
+            var row = new Object?[count];
+            for (var i = 0; i < count; i++)
             {
-                var model = (T)typeof(T).CreateInstance();
-                for (var i = 0; i < row.Length; i++)
-                {
-                    // 扩展赋值，或 反射赋值
-                    if (dic.TryGetValue(Columns[i], out var pi) && pi.CanWrite)
-                    {
-                        var val = row[i].ChangeType(pi.PropertyType);
-                        if (model is IExtend ext)
-                            ext[Columns[i]] = val;
-                        else
-                            pi.SetValue(model, val, null);
-                    }
-                }
-
-                yield return model;
+                row[i] = reader.ReadValue(ts[i]);
             }
+            rs.Add(row);
         }
-        #endregion
+        Rows = rs;
+    }
+    #endregion
 
-        #region 获取
-        /// <summary>读取指定行的字段值</summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="row"></param>
-        /// <param name="name"></param>
-        /// <returns></returns>
-        public T Get<T>(Int32 row, String name) => !TryGet<T>(row, name, out var value) ? default : value;
+    #region Csv序列化
+    /// <summary>保存到Csv文件</summary>
+    /// <param name="file"></param>
+    public void SaveCsv(String file)
+    {
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var rows = Rows;
 
-        /// <summary>尝试读取指定行的字段值</summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="row"></param>
-        /// <param name="name"></param>
-        /// <param name="value"></param>
-        /// <returns></returns>
-        public Boolean TryGet<T>(Int32 row, String name, out T value)
+        using var csv = new CsvFile(file, true);
+        csv.WriteLine(cs);
+        if (rows != null) csv.WriteAll(rows);
+    }
+
+    /// <summary>从Csv文件加载</summary>
+    /// <param name="file"></param>
+    public void LoadCsv(String file)
+    {
+        using var csv = new CsvFile(file, false);
+        var cs = csv.ReadLine();
+        if (cs != null) Columns = cs;
+        Rows = csv.ReadAll().Cast<Object?[]>().ToList();
+    }
+    #endregion
+
+    #region 读写模型
+    /// <summary>写入模型列表</summary>
+    /// <typeparam name="T">模型类型。AOT 下其公开属性与字段将按需保留</typeparam>
+    /// <param name="models"></param>
+    public void WriteModels<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicFields)] T>(IEnumerable<T> models)
+    {
+        // 可用属性
+        var pis = typeof(T).GetProperties(true);
+        pis = pis.Where(e => e.PropertyType.IsBaseType()).ToArray();
+
+        // 头部
+        if (Columns == null || Columns.Length == 0)
         {
-            value = default;
-            var rs = Rows;
+            Columns = pis.Select(e => SerialHelper.GetName(e)).ToArray();
+            Types = pis.Select(e => e.PropertyType).ToArray();
+        }
 
-            if (row < 0 || row >= rs.Count || name.IsNullOrEmpty()) return false;
+        Rows = Cast(models).ToList();
+    }
 
-            var col = GetColumn(name);
-            if (col < 0) return false;
+    /// <summary>模型列表转为对象数组行。支持WriteRows/SaveRows实现一边处理一边写入</summary>
+    /// <typeparam name="T">模型类型。AOT 下其公开属性与字段将按需保留</typeparam>
+    /// <param name="models"></param>
+    /// <returns></returns>
+    public IEnumerable<Object?[]> Cast<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicFields)] T>(IEnumerable<T> models)
+    {
+        // 可用属性
+        var pis = typeof(T).GetProperties(true);
+        pis = pis.Where(e => e.PropertyType.IsBaseType()).ToArray();
 
-            value = rs[row][col].ChangeType<T>();
+        foreach (var item in models)
+        {
+            var row = new Object?[Columns.Length];
+            for (var i = 0; i < row.Length; i++)
+            {
+                // 反射取值
+                if (pis[i].CanRead)
+                {
+                    if (item is IModel ext)
+                        row[i] = ext[pis[i].Name];
+                    else if (item != null)
+                        row[i] = item.GetValue(pis[i]);
+                }
+            }
+            yield return row;
+        }
+    }
+
+    /// <summary>数据表转模型列表。普通反射，便于DAL查询后转任意模型列表</summary>
+    /// <typeparam name="T">模型类型。AOT 下其公开属性与字段将按需保留</typeparam>
+    /// <returns></returns>
+    public IEnumerable<T> ReadModels<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicFields)] T>()
+    {
+        foreach (var model in ReadModels(typeof(T)))
+        {
+            yield return (T)model;
+        }
+    }
+
+    /// <summary>数据表转模型列表。普通反射，便于DAL查询后转任意模型列表</summary>
+    /// <param name="type">模型类型。AOT 下其公开属性与字段将按需保留</param>
+    /// <returns></returns>
+    public IEnumerable<Object> ReadModels([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicFields)] Type type)
+    {
+        var cs = Columns ?? throw new ArgumentNullException(nameof(Columns));
+        var rows = Rows;
+        if (rows == null) yield break;
+
+        // 可用属性（通过 DefaultReflect 缓存，避免重复反射扫描）
+        var pis = type.GetProperties(true);
+        var dic = pis.ToDictionary(e => SerialHelper.GetName(e), e => e, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var row in rows)
+        {
+            var model = type.CreateInstance();
+            if (model == null) continue;
+
+            for (var i = 0; i < row.Length; i++)
+            {
+                // 扩展赋值，或 反射赋值
+                if (dic.TryGetValue(cs[i], out var pi) && pi.CanWrite)
+                {
+                    var val = row[i].ChangeType(pi.PropertyType);
+                    if (model is IModel ext)
+                        ext[pi.Name] = val;
+                    else
+                        model.SetValue(pi, val);
+                }
+            }
+
+            yield return model;
+        }
+    }
+    #endregion
+
+    #region 获取
+    /// <summary>读取指定行的字段值</summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="row"></param>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    public T? Get<T>(Int32 row, String name) => !TryGet<T>(row, name, out var value) ? default : value;
+
+    /// <summary>尝试读取指定行的字段值</summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="row"></param>
+    /// <param name="name"></param>
+    /// <param name="value"></param>
+    /// <returns></returns>
+    public Boolean TryGet<T>(Int32 row, String name, out T? value)
+    {
+        value = default;
+        var rs = Rows;
+        if (rs == null) return false;
+
+        if (row < 0 || row >= rs.Count || name.IsNullOrEmpty()) return false;
+
+        var col = GetColumn(name);
+        if (col < 0) return false;
+
+        value = rs[row][col].ChangeType<T>();
+
+        return true;
+    }
+
+    /// <summary>根据名称找字段序号</summary>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    public Int32 GetColumn(String name)
+    {
+        var cs = Columns;
+        if (cs == null) return -1;
+
+        for (var i = 0; i < cs.Length; i++)
+        {
+            if (cs[i].EqualIgnoreCase(name)) return i;
+        }
+
+        return -1;
+    }
+    #endregion
+
+    #region 辅助
+    /// <summary>数据集</summary>
+    /// <returns></returns>
+    public override String ToString() => $"DbTable[{Columns?.Length}][{Rows?.Count}]";
+
+    private static IDictionary<TypeCode, Object?>? _Defs;
+    private static Object? GetDefault(TypeCode tc)
+    {
+        if (_Defs == null)
+        {
+            var dic = new Dictionary<TypeCode, Object?>();
+#if NET5_0_OR_GREATER
+            var items = Enum.GetValues<TypeCode>();
+#else
+            var items = (TypeCode[])Enum.GetValues(typeof(TypeCode));
+#endif
+            foreach (var tc2 in items)
+            {
+                Object? val = null;
+                val = tc2 switch
+                {
+                    TypeCode.Boolean => false,
+                    TypeCode.Char => (Char)0,
+                    TypeCode.SByte => (SByte)0,
+                    TypeCode.Byte => (Byte)0,
+                    TypeCode.Int16 => (Int16)0,
+                    TypeCode.UInt16 => (UInt16)0,
+                    TypeCode.Int32 => 0,
+                    TypeCode.UInt32 => (UInt32)0,
+                    TypeCode.Int64 => (Int64)0,
+                    TypeCode.UInt64 => (UInt64)0,
+                    TypeCode.Single => (Single)0,
+                    TypeCode.Double => (Double)0,
+                    TypeCode.Decimal => (Decimal)0,
+                    TypeCode.DateTime => DateTime.MinValue,
+                    _ => null,
+                };
+                dic[tc2] = val;
+            }
+            _Defs = dic;
+        }
+
+        return _Defs.TryGetValue(tc, out var obj) ? obj : null;
+    }
+
+    Object ICloneable.Clone() => Clone();
+
+    /// <summary>克隆</summary>
+    /// <returns></returns>
+    public DbTable Clone()
+    {
+        var dt = new DbTable
+        {
+            Columns = Columns.ToArray(),
+            Types = Types.ToArray(),
+            Rows = Rows.ToList(),
+            Total = Total
+        };
+
+        return dt;
+    }
+
+    /// <summary>获取数据行</summary>
+    /// <param name="index"></param>
+    /// <returns></returns>
+    public DbRow GetRow(Int32 index) => new(this, index);
+    #endregion
+
+    #region 枚举
+    /// <summary>获取枚举</summary>
+    /// <returns></returns>
+    public IEnumerator<DbRow> GetEnumerator() => new DbEnumerator { Table = this };
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    private struct DbEnumerator : IEnumerator<DbRow>
+    {
+        public DbTable Table { get; set; }
+
+        private Int32 _row;
+        private DbRow _Current;
+        public readonly DbRow Current => _Current;
+
+        readonly Object IEnumerator.Current => _Current;
+
+        public Boolean MoveNext()
+        {
+            var rs = Table.Rows;
+            if (rs == null || rs.Count == 0) return false;
+
+            // 首次或 Reset 后的第一次枚举，_row 可能是 -1（Reset 设置）或默认 0。
+            if (_row < 0) _row = 0;
+
+            // 已到结尾
+            if (_row >= rs.Count)
+            {
+                _Current = default;
+                return false;
+            }
+
+            // 先构建当前行，再为下一次枚举准备索引，避免第一次返回索引1
+            _Current = new DbRow(Table, _row);
+            _row++;
 
             return true;
         }
 
-        /// <summary>根据名称找字段序号</summary>
-        /// <param name="name"></param>
-        /// <returns></returns>
-        public Int32 GetColumn(String name)
+        public void Reset()
         {
-            var cs = Columns;
-            if (cs == null) return -1;
-
-            for (var i = 0; i < cs.Length; i++)
-            {
-                if (cs[i].EqualIgnoreCase(name)) return i;
-            }
-
-            return -1;
-        }
-        #endregion
-
-        #region 辅助
-        /// <summary>数据集</summary>
-        /// <returns></returns>
-        public override String ToString() => $"DbTable[{Columns?.Length}][{Rows?.Count}]";
-
-        private static IDictionary<TypeCode, Object> _Defs;
-        private static Object GetDefault(TypeCode tc)
-        {
-            if (_Defs == null)
-            {
-                var dic = new Dictionary<TypeCode, Object>();
-                foreach (TypeCode item in Enum.GetValues(typeof(TypeCode)))
-                {
-                    Object val = null;
-                    val = item switch
-                    {
-                        TypeCode.Boolean => false,
-                        TypeCode.Char => (Char)0,
-                        TypeCode.SByte => (SByte)0,
-                        TypeCode.Byte => (Byte)0,
-                        TypeCode.Int16 => (Int16)0,
-                        TypeCode.UInt16 => (UInt16)0,
-                        TypeCode.Int32 => 0,
-                        TypeCode.UInt32 => (UInt32)0,
-                        TypeCode.Int64 => (Int64)0,
-                        TypeCode.UInt64 => (UInt64)0,
-                        TypeCode.Single => (Single)0,
-                        TypeCode.Double => (Double)0,
-                        TypeCode.Decimal => (Decimal)0,
-                        TypeCode.DateTime => DateTime.MinValue,
-                        _ => null,
-                    };
-                    dic[item] = val;
-                }
-                _Defs = dic;
-            }
-
-            return _Defs[tc];
+            _Current = default;
+            _row = -1;
         }
 
-        Object ICloneable.Clone() => Clone();
-
-        /// <summary>克隆</summary>
-        /// <returns></returns>
-        public DbTable Clone()
-        {
-            var dt = new DbTable
-            {
-                Columns = Columns,
-                Types = Types,
-                Rows = Rows,
-                Total = Total
-            };
-
-            return dt;
-        }
-
-        /// <summary>获取数据行</summary>
-        /// <param name="index"></param>
-        /// <returns></returns>
-        public DbRow GetRow(Int32 index) => new(this, index);
-        #endregion
-
-        #region 枚举
-        /// <summary>获取枚举</summary>
-        /// <returns></returns>
-        public IEnumerator<DbRow> GetEnumerator() => new DbEnumerator { Table = this };
-
-        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-        private struct DbEnumerator : IEnumerator<DbRow>
-        {
-            public DbTable Table { get; set; }
-
-            private Int32 _row;
-            private DbRow _Current;
-            public DbRow Current => _Current;
-
-            Object IEnumerator.Current => _Current;
-
-            public Boolean MoveNext()
-            {
-                var rs = Table?.Rows;
-                if (rs == null || rs.Count == 0) return false;
-
-                if (_row < 0 || _row >= rs.Count)
-                {
-                    _Current = default;
-                    return false;
-                }
-
-                _Current = new DbRow(Table, _row);
-
-                _row++;
-
-                return true;
-            }
-
-            public void Reset()
-            {
-                _Current = default;
-                _row = -1;
-            }
-
-            public void Dispose() { }
-        }
-        #endregion
+        public void Dispose() { }
     }
+    #endregion
 }

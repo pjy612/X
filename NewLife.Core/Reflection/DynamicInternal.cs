@@ -1,73 +1,76 @@
-﻿using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Dynamic;
 using System.Globalization;
 using System.Reflection;
 
-namespace NewLife.Reflection
+namespace NewLife.Reflection;
+
+/// <summary>包装程序集内部类的动态对象</summary>
+[RequiresDynamicCode("动态对象依赖运行时绑定，NativeAOT 下不可用")]
+public class DynamicInternal : DynamicObject
 {
-    /// <summary>包装程序集内部类的动态对象</summary>
-    public class DynamicInternal : DynamicObject
+    private Object? Real { get; set; }
+
+    /// <summary>类型转换</summary>
+    /// <param name="binder"></param>
+    /// <param name="result"></param>
+    /// <returns></returns>
+    public override Boolean TryConvert(ConvertBinder binder, out Object? result)
     {
-        private Object Real { get; set; }
+        result = Real;
 
-        /// <summary>类型转换</summary>
-        /// <param name="binder"></param>
-        /// <param name="result"></param>
-        /// <returns></returns>
-        public override Boolean TryConvert(ConvertBinder binder, out Object result)
-        {
-            result = Real;
-
-            return true;
-        }
-
-        /// <summary>成员取值</summary>
-        /// <param name="binder"></param>
-        /// <param name="result"></param>
-        /// <returns></returns>
-        public override Boolean TryGetMember(GetMemberBinder binder, out Object result)
-        {
-            var property = Real.GetType().GetProperty(binder.Name, BindingFlags.GetProperty | BindingFlags.Public | BindingFlags.Instance);
-            if (property == null)
-            {
-                result = null;
-            }
-            else
-            {
-                result = property.GetValue(Real, null);
-                result = Wrap(result);
-            }
-            return true;
-        }
-
-        /// <summary>调用成员</summary>
-        /// <param name="binder"></param>
-        /// <param name="args"></param>
-        /// <param name="result"></param>
-        /// <returns></returns>
-        public override Boolean TryInvokeMember(InvokeMemberBinder binder, Object[] args, out Object result)
-        {
-            result = Real.GetType().InvokeMember(binder.Name, BindingFlags.InvokeMethod | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance, null, Real, args, CultureInfo.InvariantCulture);
-
-            return true;
-        }
-
-        /// <summary>包装</summary>
-        /// <param name="obj"></param>
-        /// <returns></returns>
-        public static Object Wrap(Object obj)
-        {
-            if (obj == null) return null;
-            if (obj.GetType().IsPublic) return obj;
-
-            return new DynamicInternal { Real = obj };
-        }
-
-        /// <summary>已重载。</summary>
-        /// <returns></returns>
-        public override String ToString()
-        {
-            return Real.ToString();
-        }
+        return true;
     }
+
+    /// <summary>成员取值</summary>
+    /// <param name="binder"></param>
+    /// <param name="result"></param>
+    /// <returns></returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "DLR 动态成员访问天然依赖运行时反射；AOT 下请使用强类型 API")]
+    public override Boolean TryGetMember(GetMemberBinder binder, out Object? result)
+    {
+        if (Real == null) throw new ArgumentNullException(nameof(Real));
+
+        var property = Real.GetType().GetProperty(binder.Name, BindingFlags.GetProperty | BindingFlags.Public | BindingFlags.Instance);
+        if (property == null)
+        {
+            result = null;
+        }
+        else
+        {
+            result = property.GetValue(Real, null);
+            if (result != null) result = Wrap(result);
+        }
+        return true;
+    }
+
+    /// <summary>调用成员</summary>
+    /// <param name="binder"></param>
+    /// <param name="args"></param>
+    /// <param name="result"></param>
+    /// <returns></returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "DLR 动态成员调用天然依赖运行时反射；AOT 下请使用强类型 API")]
+    public override Boolean TryInvokeMember(InvokeMemberBinder binder, Object?[]? args, out Object? result)
+    {
+        if (Real == null) throw new ArgumentNullException(nameof(Real));
+
+        result = Real.GetType().InvokeMember(binder.Name, BindingFlags.InvokeMethod | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance, null, Real, args, CultureInfo.InvariantCulture);
+
+        return true;
+    }
+
+    /// <summary>包装</summary>
+    /// <param name="obj"></param>
+    /// <returns></returns>
+    public static Object Wrap(Object obj)
+    {
+        //if (obj == null) return null;
+        if (obj.GetType().IsPublic) return obj;
+
+        return new DynamicInternal { Real = obj };
+    }
+
+    /// <summary>已重载。</summary>
+    /// <returns></returns>
+    public override String ToString() => Real?.ToString() ?? nameof(DynamicInternal);
 }

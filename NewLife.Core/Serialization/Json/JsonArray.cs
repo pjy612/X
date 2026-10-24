@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using NewLife.Reflection;
 
 namespace NewLife.Serialization;
@@ -17,7 +18,7 @@ public class JsonArray : JsonHandlerBase
     /// <param name="value"></param>
     /// <param name="type"></param>
     /// <returns></returns>
-    public override Boolean Write(Object value, Type type)
+    public override Boolean Write(Object? value, Type type)
     {
         if (value is not IList list) return false;
 
@@ -38,20 +39,24 @@ public class JsonArray : JsonHandlerBase
     /// <param name="type"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public override Boolean TryRead(Type type, ref Object value)
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "按运行时类型动态构造集合；AOT 下请使用泛型读写入口")]
+    public override Boolean TryRead(Type type, ref Object? value)
     {
-        if (!type.As<IList>()) return false;
+        if (!type.As<IList>() && !type.As(typeof(IList<>))) return false;
 
         // 先读取
         if (!Host.Read("[")) return false;
 
         // 子元素类型
         var elmType = type.GetElementTypeEx();
+        if (elmType == null) throw new ArgumentNullException(nameof(elmType));
 
         var list = typeof(IList<>).MakeGenericType(elmType).CreateInstance() as IList;
+        if (list == null) throw new ArgumentOutOfRangeException(nameof(elmType));
+
         while (!Host.Read("]"))
         {
-            Object obj = null;
+            Object? obj = null;
             if (!Host.TryRead(elmType, ref obj)) return false;
 
             list.Add(obj);
@@ -60,7 +65,7 @@ public class JsonArray : JsonHandlerBase
         // 数组的创建比较特别
         if (type.As<Array>())
         {
-            value = Array.CreateInstance(type.GetElementTypeEx(), list.Count);
+            value = Array.CreateInstance(elmType, list.Count);
             list.CopyTo((Array)value, 0);
         }
         else

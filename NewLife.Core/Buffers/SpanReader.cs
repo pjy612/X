@@ -1,0 +1,725 @@
+﻿using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+using NewLife.Data;
+using NewLife.Reflection;
+using NewLife.Serialization;
+
+namespace NewLife.Buffers;
+
+/// <summary>Span读取器</summary>
+/// <remarks>
+/// 引用结构，零分配读取二进制数据，支持自动从底层 <see cref="Stream"/> 追加读取。
+/// 典型用于解析 Redis/MySql/自定义协议帧；支持 7 位压缩整数、结构体直接反序列化等。
+/// 设计目标：在已有 <see cref="ReadOnlySpan{T}"/> / <see cref="IPacket"/> 基础上提供统一顺序读取 API，必要时按需增量拉取后续字节。
+/// </remarks>
+public ref struct SpanReader
+{
+    #region 属性
+    private ReadOnlySpan<Byte> _span;
+    /// <summary>数据片段</summary>
+    public readonly ReadOnlySpan<Byte> Span => _span;
+
+    private Int32 _index;
+    /// <summary>已读取字节数（相对当前 <see cref="Span"/> 起始）</summary>
+    public Int32 Position { readonly get => _index; set => _index = value; }
+
+    /// <summary>当前缓冲总容量（不代表完整数据总长度，若基于流扩容仅表示当前已缓存区大小）</summary>
+    public readonly Int32 Capacity => _span.Length;
+
+    /// <summary>剩余可读字节数（旧版名称，仅为兼容旧二进制保留）</summary>
+    /// <remarks>等价于 <c>Capacity - Position</c>。若读取器基于流扩容，该值仅代表当前已缓存区的剩余量</remarks>
+    [Obsolete("请改用 Capacity - Position")]
+    public readonly Int32 FreeCapacity => Capacity - Position;
+
+    /// <summary>空闲容量（尚未读取的剩余字节数）</summary>
+    public readonly Int32 Available => _span.Length - _index;
+
+    /// <summary>是否小端字节序。默认 true</summary>
+    public Boolean IsLittleEndian { get; set; } = true;
+
+    /// <summary>使用7位压缩编码整数。默认false。启用后 ReadInt16/Int32/Int64 及无符号变体使用变长编码，与 <see cref="Binary.EncodeInt"/> 行为一致</summary>
+    public Boolean EncodeInt { get; set; }
+
+    /// <summary>使用完整时间格式。默认false使用4字节Unix秒数，true使用 <see cref="DateTime.FromBinary"/> 8字节格式，与 <see cref="Binary.FullTime"/> 行为一致</summary>
+    public Boolean FullTime { get; set; }
+
+    private static readonly DateTime _dt1970 = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    #endregion
+
+    #region 构造
+    /// <summary>实例化读取器，直接包裹只读跨度，不会拷贝</summary>
+    /// <param name="span">数据</param>
+    public SpanReader(ReadOnlySpan<Byte> span) => _span = span;
+
+    /// <summary>实例化读取器，直接包裹可写跨度（按只读处理）</summary>
+    /// <param name="span">数据</param>
+    public SpanReader(Span<Byte> span) => _span = span;
+
+    /// <summary>实例化读取器，基于数据包。链式数据包同时保留 <see cref="IPacket"/> 以支持 <see cref="ReadPacket"/> 零拷贝；必要时退化为流增量模式。</summary>
+    /// <param name="data">初始数据包</param>
+    public SpanReader(IPacket data)
+    {
+        if (data == null) throw new ArgumentNullException(nameof(data));
+
+        // 如果有后续数据包，说明是链式数据包，必须通过流读取
+        // 链式数据包：为了兼容跨段后续读取（读取原始 span 内部结构体/整数等可能需要更多字节），
+        // 这里把链式包聚合为内存流，后续读取统一走流。
+        // 注意：聚合是立即发生的（GetStream 遍历整链拷贝），不是延迟到 EnsureSpace 才触发。
+        if (data.Next != null)
+        {
+            _stream = data.GetStream(false);
+            _bufferSize = 8192;
+
+            // 链式包的字节数已经全部可用，计入 _total 供 MaxCapacity 记账；
+            // 旧实现漏赋值会让链式入参的容量上限判断失效
+            _total = data.Total;
+        }
+        else
+        {
+            _data = data;
+            _span = data.GetSpan();
+            _total = data.Total;
+        }
+    }
+
+    /// <summary>实例化读取器，从字节数组创建</summary>
+    /// <param name="buffer">字节数组</param>
+    /// <param name="offset">起始偏移量</param>
+    /// <param name="count">长度，-1表示从offset到数组末尾</param>
+    public SpanReader(Byte[] buffer, Int32 offset = 0, Int32 count = -1) : this(new ReadOnlySpan<Byte>(buffer, offset, count < 0 ? buffer.Length - offset : count)) { }
+    #endregion
+
+    #region 扩容增强
+    /// <summary>最大容量。多次从数据流读取数据时，受限于此最大值（0 表示不限制）</summary>
+    public Int32 MaxCapacity { get; set; }
+
+    private Stream? _stream;
+    private readonly Int32 _bufferSize;
+    // 当前缓存（或原始）数据包，仅用于 ReadPacket 以及流扩容缓存承载
+    private IPacket? _data;
+    // 是否自己从池里借出了承载缓冲（仅流式扩容路径置位）：释放只归还自己借的，不动调用方传入的数据包
+    private Boolean _ownsData;
+    // 已成功读取/缓存的总字节数（用于 MaxCapacity 计算）
+    private Int32 _total;
+
+    /// <summary>实例化读取器，支持后续从流追加读取（突破初始大小限制）</summary>
+    /// <remarks>
+    /// 解析网络协议时，数据帧可能超过初始缓冲区大小。提供 <paramref name="stream"/> 后，
+    /// 当剩余可读字节不足时，会自动从流中读取一批数据并扩充内部缓冲区。
+    /// <para><b>释放</b>：扩容会从数组池借缓冲，读取器用完必须调用 <see cref="Dispose"/>（如 <c>using var reader = new SpanReader(stream);</c>），否则该缓冲无法归还池。</para>
+    /// </remarks>
+    /// <param name="stream">底层数据流，一般为网络流</param>
+    /// <param name="data">初始数据包，可为空（例如已经到达的响应头）。扩容替换缓冲时会被读取器释放，调用方不应再持有</param>
+    /// <param name="bufferSize">每次追加读取建议大小（最小分块）</param>
+    public SpanReader(Stream stream, IPacket? data = null, Int32 bufferSize = 8192)
+    {
+        _stream = stream;
+        _bufferSize = bufferSize;
+
+        if (data != null)
+        {
+            _data = data;
+            _span = data.GetSpan();
+            _total = data.Total;
+        }
+    }
+    #endregion
+
+    #region 基础方法
+    /// <summary>告知已消耗指定字节</summary>
+    /// <param name="count">要消耗的字节数</param>
+    /// <exception cref="ArgumentOutOfRangeException">count &lt; 0 或超出当前剩余</exception>
+    public void Advance(Int32 count)
+    {
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count), L.T("Count cannot be negative."));
+        if (count > 0) EnsureSpace(count);
+        if (_index + count > _span.Length)
+            throw new ArgumentOutOfRangeException(nameof(count), L.T("Exceeds available data."));
+        _index += count;
+    }
+
+    /// <summary>返回剩余可读数据片段（只读）</summary>
+    /// <param name="sizeHint">期望的最小大小提示。如果剩余空间小于该值则抛出异常</param>
+    /// <returns>当前位置到末尾的只读字节片段</returns>
+    /// <exception cref="ArgumentOutOfRangeException">当 <paramref name="sizeHint"/> 大于剩余可读字节数时</exception>
+    public readonly ReadOnlySpan<Byte> GetSpan(Int32 sizeHint = 0)
+    {
+        if (_index + sizeHint > _span.Length)
+            throw new ArgumentOutOfRangeException(nameof(sizeHint), L.T("Size hint exceeds free capacity."));
+        return _span[_index..];
+    }
+    #endregion
+
+    #region 读取方法
+    /// <summary>确保缓冲区中有足够的可读取字节。若不足：
+    /// <list type="number">
+    /// <item>存在底层流 → 追加读取并重组内部缓冲</item>
+    /// <item>无流但为单段数据 → 抛出异常</item>
+    /// <item>无流且链式数据包（多段）→ 当前版本仍抛出（仅 <see cref="ReadPacket"/> 支持跨段零拷贝）</item>
+    /// </list>
+    /// </summary>
+    /// <param name="size">需要的字节数</param>
+    /// <exception cref="InvalidOperationException">数据不足且无法补齐</exception>
+    public void EnsureSpace(Int32 size)
+    {
+        // 检查剩余空间大小，不足时再从数据流中读取。创建新的 OwnerPacket 后，
+        // 先把之前剩余的未读数据拷贝到新缓冲的前部，避免丢失，再从流中读取补齐。
+        if (size <= 0) return;
+
+        var remain = Available;
+        if (remain >= size) return;
+
+        if (_stream != null)
+        {
+            // 申请新的数据块：至少满足 size，且考虑 bufferSize / MaxCapacity
+            var bsize = size;
+            if (bsize < _bufferSize) bsize = _bufferSize;
+            if (MaxCapacity > 0 && bsize > MaxCapacity - _total) bsize = MaxCapacity - _total;
+            if (remain + bsize < size) throw new InvalidOperationException();
+
+            // 先取出旧数据包的数组视图，再租借新缓冲。校验必须排在租借之前：
+            // 校验失败抛异常时新缓冲尚未挂到 _data 上，本方法又没有归还动作，这块池缓冲会永远回不到池
+            var old = _data;
+            var oldData = default(ArraySegment<Byte>);
+            if (old != null && remain > 0 && !old.TryGetArray(out oldData))
+                throw new NotSupportedException(L.T("Data packet does not support array access."));
+
+            var pk = new OwnerPacket(bsize);
+
+            // 把剩余未读数据拷贝到新数据块前部，避免丢失
+            var available = 0;
+            if (old != null && remain > 0)
+            {
+                oldData.AsSpan(_index, remain).CopyTo(pk.Buffer);
+                available += remain;
+            }
+
+            old.TryDispose();
+            _data = pk;
+            _ownsData = true;
+            _index = 0; // 重置索引，后续直接从新缓冲读取
+
+            // 直接读取指定大小，必要时抛异常，防止阻塞等待不确定长度数据
+            //_stream.ReadExactly(pk.Buffer, pk.Offset + available, pk.Length - available);
+            available = _stream.ReadAtLeast(pk.Buffer, pk.Offset + available, pk.Length - available, size - remain, false);
+            if (remain + available < size)
+                throw new InvalidOperationException(L.T("Not enough data to read. Required: {0}, Available: {1}", size, available));
+            pk.Resize(remain + available);
+
+            _span = pk.GetSpan();
+            _total += pk.Length - remain;
+        }
+
+        if (_index + size > _span.Length)
+            throw new InvalidOperationException(L.T("Not enough data to read. Required: {0}, Available: {1}", size, Available));
+    }
+
+    /// <summary>读取单个字节</summary>
+    /// <returns>读取的字节值</returns>
+    public Byte ReadByte()
+    {
+        const Int32 size = sizeof(Byte);
+        EnsureSpace(size);
+        var result = _span[_index];
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取Int16整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的整数值</returns>
+    public Int16 ReadInt16()
+    {
+        if (EncodeInt) return (Int16)ReadEncodedInt();
+        const Int32 size = sizeof(Int16);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadInt16LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadInt16BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取UInt16整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的无符号整数值</returns>
+    public UInt16 ReadUInt16()
+    {
+        if (EncodeInt) return (UInt16)ReadEncodedInt();
+        const Int32 size = sizeof(UInt16);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadUInt16LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadUInt16BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取Int32整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的整数值</returns>
+    public Int32 ReadInt32()
+    {
+        if (EncodeInt) return ReadEncodedInt();
+        const Int32 size = sizeof(Int32);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadInt32LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadInt32BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取UInt32整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的无符号整数值</returns>
+    public UInt32 ReadUInt32()
+    {
+        if (EncodeInt) return (UInt32)ReadEncodedInt();
+        const Int32 size = sizeof(UInt32);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadUInt32LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadUInt32BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取24位无符号整数（3字节），受 <see cref="IsLittleEndian"/> 控制</summary>
+    /// <returns>读取的无符号整数值（24位有效）</returns>
+    public UInt32 ReadUInt24()
+    {
+        const Int32 size = 3;
+        EnsureSpace(size);
+        var span = _span.Slice(_index, size);
+        var result = IsLittleEndian
+            ? (UInt32)(span[0] | (span[1] << 8) | (span[2] << 16))
+            : (UInt32)((span[0] << 16) | (span[1] << 8) | span[2]);
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取Int64整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的长整数值</returns>
+    public Int64 ReadInt64()
+    {
+        if (EncodeInt) return ReadEncodedInt64();
+        const Int32 size = sizeof(Int64);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadInt64LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadInt64BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取UInt64整数。当 <see cref="EncodeInt"/> 为 true 时读取7位压缩编码整数</summary>
+    /// <returns>读取的无符号长整数值</returns>
+    public UInt64 ReadUInt64()
+    {
+        if (EncodeInt) return (UInt64)ReadEncodedInt64();
+        const Int32 size = sizeof(UInt64);
+        EnsureSpace(size);
+        var result = IsLittleEndian
+            ? BinaryPrimitives.ReadUInt64LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadUInt64BigEndian(_span.Slice(_index, size));
+        _index += size;
+        return result;
+    }
+
+    /// <summary>读取单精度浮点数（固定4字节，不受 <see cref="EncodeInt"/> 影响）</summary>
+    /// <returns>读取的浮点值</returns>
+    public Single ReadSingle()
+    {
+        const Int32 size = sizeof(Single);
+        EnsureSpace(size);
+        var bits = IsLittleEndian
+            ? BinaryPrimitives.ReadInt32LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadInt32BigEndian(_span.Slice(_index, size));
+        _index += size;
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP
+        return BitConverter.Int32BitsToSingle(bits);
+#else
+        return Unsafe.ReadUnaligned<Single>(ref Unsafe.As<Int32, Byte>(ref bits));
+#endif
+    }
+
+    /// <summary>读取双精度浮点数（固定8字节，不受 <see cref="EncodeInt"/> 影响）</summary>
+    /// <returns>读取的双精度浮点值</returns>
+    public Double ReadDouble()
+    {
+        const Int32 size = sizeof(Double);
+        EnsureSpace(size);
+        var bits = IsLittleEndian
+            ? BinaryPrimitives.ReadInt64LittleEndian(_span.Slice(_index, size))
+            : BinaryPrimitives.ReadInt64BigEndian(_span.Slice(_index, size));
+        _index += size;
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP
+        return BitConverter.Int64BitsToDouble(bits);
+#else
+        return Unsafe.ReadUnaligned<Double>(ref Unsafe.As<Int64, Byte>(ref bits));
+#endif
+    }
+
+    /// <summary>读取字符串。支持定长、读取全部与 7 位压缩长度前缀</summary>
+    /// <param name="length">需要读取的长度。-1 读取剩余全部；0 读取 7 位压缩长度前缀；&gt;0 定长</param>
+    /// <param name="encoding">编码，默认 UTF8</param>
+    /// <returns>解码的字符串</returns>
+    /// <exception cref="InvalidDataException">长度前缀解出负数（对端数据非法）时</exception>
+    public String ReadString(Int32 length = 0, Encoding? encoding = null)
+    {
+        var actualLength = length switch
+        {
+            < 0 => _span.Length - _index,
+            0 => ReadEncodedInt(),
+            _ => length
+        };
+
+        // 长度前缀来自对端字节，7 位压缩可以解出负数。不拦截的话，EnsureSpace 会直接放行，
+        // 随后 Slice 抛出与该数据无关的 ArgumentOutOfRangeException，排障时容易误判成代码缺陷；
+        // 这里显式按“数据非法”报错
+        if (actualLength < 0)
+            throw new InvalidDataException(L.T("Invalid string length [{0}].", actualLength));
+
+        if (actualLength == 0) return String.Empty;
+
+        EnsureSpace(actualLength);
+
+        encoding ??= Encoding.UTF8;
+        var result = encoding.GetString(_span.Slice(_index, actualLength));
+        _index += actualLength;
+        return result;
+    }
+
+    /// <summary>读取字节数组片段</summary>
+    /// <param name="length">要读取的字节数</param>
+    /// <returns>只读字节片段</returns>
+    /// <exception cref="ArgumentOutOfRangeException">当 <paramref name="length"/> 为负数时</exception>
+    public ReadOnlySpan<Byte> ReadBytes(Int32 length)
+    {
+        if (length < 0)
+            throw new ArgumentOutOfRangeException(nameof(length), L.T("Length cannot be negative."));
+        EnsureSpace(length);
+
+        var result = _span.Slice(_index, length);
+        _index += length;
+        return result;
+    }
+
+    /// <summary>读取到目标 Span</summary>
+    /// <param name="data">目标缓冲区</param>
+    /// <returns>实际读取的字节数</returns>
+    public Int32 Read(Span<Byte> data)
+    {
+        var length = data.Length;
+        EnsureSpace(length);
+
+        var result = _span.Slice(_index, length);
+        result.CopyTo(data);
+        _index += length;
+        return length;
+    }
+
+    /// <summary>读取数据包。有底层 <see cref="IPacket"/> 时直接切片（零拷贝）；否则申请 <see cref="OwnerPacket"/> 并拷贝数据。</summary>
+    /// <remarks>
+    /// <para>底层为 <see cref="OwnerPacket"/> 时，返回共享切片（对窗口内各段递增引用计数），可独立使用与释放；
+    /// 连续多次读取互不影响，流式补齐替换内部缓冲时旧缓冲由共享引用保活。</para>
+    /// <para>底层为其它数据包（如 <see cref="ArrayPacket"/>）时，返回不持有引用的借阅视图，生命周期与底层数据包一致。</para>
+    /// <para>由 <see cref="ReadOnlySpan{T}"/>/<see cref="Span{T}"/>/字节数组构造时，降级为申请新内存并拷贝，返回可独立释放的拥有包。</para>
+    /// </remarks>
+    /// <param name="length">要读取的字节数</param>
+    /// <returns>数据包切片</returns>
+    /// <exception cref="ArgumentOutOfRangeException">长度为负数时</exception>
+    public IPacket ReadPacket(Int32 length)
+    {
+        if (length < 0)
+            throw new ArgumentOutOfRangeException(nameof(length), L.T("Length cannot be negative."));
+
+        EnsureSpace(length);
+
+        if (_data != null)
+        {
+            // 拥有包 → 共享切片（引用计数），可独立释放且连续读取互不影响；其它实现 → 借阅视图
+            var result = _data.Slice(_index, length);
+            _index += length;
+            return result;
+        }
+
+        // 无底层数据包（直接从 Span 构造），申请新内存并拷贝
+        var pk = new OwnerPacket(length);
+        _span.Slice(_index, length).CopyTo(pk.Buffer);
+        pk.Resize(length);
+        _index += length;
+        return pk;
+    }
+
+    /// <summary>读取结构体（按内存布局直接反序列化）</summary>
+    /// <typeparam name="T">结构体类型</typeparam>
+    /// <returns>反序列化的结构体实例</returns>
+    public T Read<T>() where T : struct
+    {
+        var size = Unsafe.SizeOf<T>();
+        EnsureSpace(size);
+
+        var result = MemoryMarshal.Read<T>(_span.Slice(_index));
+        _index += size;
+        return result;
+    }
+    #endregion
+
+    #region 扩展读取
+    /// <summary>以 7 位压缩格式读取 32 位整数</summary>
+    /// <returns>解压后的整数值</returns>
+    /// <exception cref="FormatException">压缩格式数值过大时</exception>
+    public Int32 ReadEncodedInt()
+    {
+        UInt32 rs = 0;
+        Byte n = 0;
+
+        while (true)
+        {
+            var b = ReadByte();
+
+            // 第 5 个字节（28+4=32 位）只剩高 4 位可用：值位溢出即超出 Int32 表示范围，
+            // 静默丢弃会解出一个完全不同的值，按格式错误拒绝（与下方字节数上限同口径）
+            if (n == 28 && (b & 0x7f) > 0x0F) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
+
+            // 必须转为 UInt32，否则可能溢出
+            rs |= (UInt32)((b & 0x7f) << n);
+            if ((b & 0x80) == 0) break;
+
+            n += 7;
+            if (n >= 32)
+                throw new FormatException(L.T("The number value is too large to read in compressed format!"));
+        }
+        return (Int32)rs;
+    }
+
+    /// <summary>以 7 位压缩格式读取 64 位整数</summary>
+    /// <returns>解压后的长整数值</returns>
+    /// <exception cref="FormatException">压缩格式数值过大时</exception>
+    public Int64 ReadEncodedInt64()
+    {
+        UInt64 rs = 0;
+        Byte n = 0;
+
+        while (true)
+        {
+            var b = ReadByte();
+
+            // 第 10 个字节（63+1=64 位）只剩最高位可用：值位溢出即超出 Int64 表示范围，
+            // 静默丢弃会解出一个完全不同的值，按格式错误拒绝（与下方字节数上限同口径）
+            if (n == 63 && (b & 0x7f) > 1) throw new FormatException(L.T("The number value is too large to read in compressed 64-bit format!"));
+
+            rs |= (UInt64)((UInt64)(b & 0x7f) << n);
+            if ((b & 0x80) == 0) break;
+
+            n += 7;
+            if (n >= 64)
+                throw new FormatException(L.T("The number value is too large to read in compressed 64-bit format!"));
+        }
+        return (Int64)rs;
+    }
+
+    /// <summary>读取长度前缀（1/2/4字节或7位编码）</summary>
+    /// <param name="sizeOf">长度字段字节数。0表示7位压缩编码，1/2/4表示固定字节数</param>
+    /// <returns>数据长度</returns>
+    private Int32 ReadLength(Int32 sizeOf) => sizeOf switch
+    {
+        0 => ReadEncodedInt(),
+        1 => ReadByte(),
+        2 => ReadUInt16(),
+        4 => ReadInt32(),
+        _ => throw new ArgumentOutOfRangeException(nameof(sizeOf), L.T("Unsupported length size: {0}. Use 0/1/2/4.", sizeOf))
+    };
+
+    /// <summary>读取长度前缀的二进制数据</summary>
+    /// <remarks>
+    /// 协议消息反序列化常用方法。先读取 <paramref name="sizeOf"/> 字节的长度前缀，再读取对应长度的数据。
+    /// <para>示例：<c>var data = reader.ReadArray(2)</c> 等效于 <c>var len = reader.ReadUInt16(); var data = reader.ReadBytes(len);</c></para>
+    /// </remarks>
+    /// <param name="sizeOf">长度字段字节数。0表示7位压缩编码，1/2/4表示固定字节数，默认2</param>
+    /// <returns>读取的只读字节片段</returns>
+    public ReadOnlySpan<Byte> ReadArray(Int32 sizeOf = 2)
+    {
+        var length = ReadLength(sizeOf);
+        if (length <= 0) return [];
+        return ReadBytes(length);
+    }
+
+    /// <summary>读取长度前缀的字符串</summary>
+    /// <remarks>
+    /// 协议消息反序列化常用方法。先读取 <paramref name="sizeOf"/> 字节的长度前缀，再按编码解码对应长度的字符串。
+    /// <para>示例：<c>var str = reader.ReadLengthString(2)</c> 读取 2 字节长度 + UTF8 内容。</para>
+    /// </remarks>
+    /// <param name="sizeOf">长度字段字节数。0表示7位压缩编码，1/2/4表示固定字节数，默认2</param>
+    /// <param name="encoding">编码，默认UTF8</param>
+    /// <returns>解码的字符串</returns>
+    public String ReadLengthString(Int32 sizeOf = 2, Encoding? encoding = null)
+    {
+        var length = ReadLength(sizeOf);
+        if (length <= 0) return String.Empty;
+
+        EnsureSpace(length);
+
+        encoding ??= Encoding.UTF8;
+        var result = encoding.GetString(_span.Slice(_index, length));
+        _index += length;
+        return result;
+    }
+    #endregion
+
+    #region 预览方法
+    /// <summary>预览单个字节，不移动位置</summary>
+    /// <returns>当前位置的字节值</returns>
+    /// <exception cref="InvalidOperationException">无数据可预览时</exception>
+    public readonly Byte PeekByte()
+    {
+        if (_index >= _span.Length)
+            throw new InvalidOperationException(L.T("No data available to peek."));
+        return _span[_index];
+    }
+
+    /// <summary>尝试预览单个字节，不移动位置</summary>
+    /// <param name="value">输出的字节值</param>
+    /// <returns>是否成功预览</returns>
+    public readonly Boolean TryPeekByte(out Byte value)
+    {
+        if (_index >= _span.Length)
+        {
+            value = 0;
+            return false;
+        }
+        value = _span[_index];
+        return true;
+    }
+
+    /// <summary>预览指定长度的字节，不移动位置</summary>
+    /// <param name="length">要预览的字节数</param>
+    /// <returns>只读字节片段</returns>
+    /// <exception cref="InvalidOperationException">剩余数据不足时</exception>
+    public readonly ReadOnlySpan<Byte> Peek(Int32 length)
+    {
+        if (_index + length > _span.Length)
+            throw new InvalidOperationException(L.T("Not enough data to peek. Required: {0}, Available: {1}", length, Available));
+        return _span.Slice(_index, length);
+    }
+
+    /// <summary>尝试预览指定长度的字节，不移动位置</summary>
+    /// <param name="length">要预览的字节数</param>
+    /// <param name="data">输出的字节片段</param>
+    /// <returns>是否成功预览</returns>
+    public readonly Boolean TryPeek(Int32 length, out ReadOnlySpan<Byte> data)
+    {
+        if (_index + length > _span.Length)
+        {
+            data = default;
+            return false;
+        }
+        data = _span.Slice(_index, length);
+        return true;
+    }
+    #endregion
+
+    #region 值序列化
+    /// <summary>读取单个基元类型值</summary>
+    /// <remarks>
+    /// 与 <see cref="SpanWriter.WriteValue"/> 格式完全对称，与 <see cref="Binary"/> 完全兼容：
+    /// 可空类型先读1字节标志（0=null直接返回null，1=有值则继续读），非可空类型直接读值。
+    /// DateTime 受 <see cref="FullTime"/> 控制：false（默认）读Unix秒数（UInt32，4字节）还原，true读Int64经 DateTime.FromBinary 还原。
+    /// 整数类型受 <see cref="EncodeInt"/> 控制：true 时读7位压缩编码，与 Binary.EncodeInt=true 一致。
+    /// Decimal 使用4×Int32格式，Byte[] 使用7位压缩编码长度前缀，Char 读取1字节。
+    /// </remarks>
+    /// <param name="type">值的类型</param>
+    /// <returns>反序列化的值，可空类型且为null时返回null</returns>
+    public Object? ReadValue(Type type)
+    {
+        // 可空类型：与 Binary 一致，先读1字节标志（0=null，1=有值）
+        if (type.IsNullable())
+        {
+            var flag = ReadByte();
+            if (flag == 0) return null;
+            // flag==1，继续读取实际值，type.GetTypeCode() 自动解除 Nullable<T> 包装
+        }
+
+        var code = type.GetTypeCode();
+        switch (code)
+        {
+            case TypeCode.Boolean: return ReadByte() != 0;
+            case TypeCode.Byte: return ReadByte();
+            case TypeCode.SByte: return unchecked((SByte)ReadByte());
+            // Char 与 Binary 一致，读取1字节
+            case TypeCode.Char: return (Char)ReadByte();
+            case TypeCode.Int16: return ReadInt16();
+            case TypeCode.UInt16: return ReadUInt16();
+            case TypeCode.Int32: return ReadInt32();
+            case TypeCode.UInt32: return ReadUInt32();
+            case TypeCode.Int64: return ReadInt64();
+            case TypeCode.UInt64: return ReadUInt64();
+            case TypeCode.Single: return ReadSingle();
+            case TypeCode.Double: return ReadDouble();
+            case TypeCode.Decimal:
+                {
+                    // 与 Binary 一致，使用4×Int32 raw bits 格式
+                    var bits = new Int32[4];
+                    for (var i = 0; i < 4; i++) bits[i] = ReadInt32();
+                    return new Decimal(bits);
+                }
+            case TypeCode.DateTime:
+                {
+                    if (FullTime)
+                    {
+                        // 与 Binary.FullTime=true 一致：读取 Int64 后经 DateTime.FromBinary 还原
+                        var binary = ReadInt64();
+                        return DateTime.FromBinary(binary);
+                    }
+                    // 与 Binary 默认(FullTime=false)一致：读Unix秒数（UInt32，4字节）还原为Utc时间
+                    var n = ReadUInt32();
+                    return n == 0 ? DateTime.MinValue : _dt1970.AddSeconds(n);
+                }
+            case TypeCode.String: return ReadString();
+            case TypeCode.Object:
+                if (type == typeof(Byte[]))
+                {
+                    // 与 Binary 一致，使用7位压缩编码长度前缀
+                    var len = ReadEncodedInt();
+                    return len > 0 ? ReadBytes(len).ToArray() : [];
+                }
+
+                if (type == typeof(Guid))
+                {
+                    var buf = ReadBytes(16).ToArray();
+                    return new Guid(buf);
+                }
+
+                throw new NotSupportedException(L.T("ReadValue does not support type {0}.", type.FullName));
+
+            default: throw new NotSupportedException(L.T("ReadValue does not support TypeCode.{0}.", code));
+        }
+    }
+
+    /// <summary>读取单个基元类型值</summary>
+    /// <typeparam name="T">类型</typeparam>
+    /// <returns>反序列化的值</returns>
+    public T? ReadValue<T>() => (T?)ReadValue(typeof(T));
+    #endregion
+
+    #region 释放
+    /// <summary>释放流式扩容借出的池缓冲。走流式扩容（<see cref="EnsureSpace"/>）的读取器用完必须调用</summary>
+    /// <remarks>
+    /// <para>从流读取超出初始数据的字节时，读取器会从数组池借一块缓冲承载已读数据；读取器是 ref struct、没有析构，不显式释放就会让这块缓冲永远回不到池（每次新建读取器漏一块，池只能不断新建数组）。用法：<c>using var reader = new SpanReader(stream);</c></para>
+    /// <para>只归还读取器自己借的缓冲：构造时传入的数据包不属于读取器，本方法不动它（它在扩容替换缓冲时已由读取器释放）。</para>
+    /// <para>释放后不应再使用本读取器。</para>
+    /// </remarks>
+    public void Dispose()
+    {
+        var data = _data;
+        var owns = _ownsData;
+
+        _data = null;
+        _ownsData = false;
+        _span = default;
+
+        if (owns) data.TryDispose();
+    }
+    #endregion
+}

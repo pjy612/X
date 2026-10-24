@@ -1,5 +1,6 @@
 ﻿using System.Collections.Specialized;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Runtime.Serialization;
 using System.Text;
@@ -7,6 +8,8 @@ using System.Web.Script.Serialization;
 using System.Xml.Serialization;
 using NewLife.Collections;
 using NewLife.Data;
+using NewLife.Reflection;
+using NewLife.Remoting;
 using NewLife.Serialization;
 
 namespace NewLife.Log;
@@ -17,32 +20,42 @@ public interface ISpan : IDisposable
     /// <summary>唯一标识。随线程上下文、Http、Rpc传递，作为内部片段的父级</summary>
     String Id { get; set; }
 
-    /// <summary>父级片段标识</summary>
-    String ParentId { get; set; }
+    /// <summary>埋点名。用于标识不同类型的操作</summary>
+    String Name { get; set; }
+
+    /// <summary>父级片段标识。用于构建调用链</summary>
+    String? ParentId { get; set; }
 
     /// <summary>跟踪标识。可用于关联多个片段，建立依赖关系，随线程上下文、Http、Rpc传递</summary>
     String TraceId { get; set; }
 
-    /// <summary>开始时间。Unix毫秒</summary>
+    /// <summary>开始时间。Unix毫秒时间戳</summary>
     Int64 StartTime { get; set; }
 
-    /// <summary>结束时间。Unix毫秒</summary>
+    /// <summary>结束时间。Unix毫秒时间戳</summary>
     Int64 EndTime { get; set; }
 
-    /// <summary>数据标签。记录一些附加数据</summary>
-    String Tag { get; set; }
+    /// <summary>用户数值。记录数字型标量，如每次数据库操作行数，星尘平台汇总统计</summary>
+    Int64 Value { get; set; }
 
-    /// <summary>错误信息</summary>
-    String Error { get; set; }
+    /// <summary>数据标签。记录一些附加数据，如请求参数、响应结果等</summary>
+    String? Tag { get; set; }
 
-    /// <summary>设置错误信息</summary>
-    /// <param name="ex">异常</param>
-    /// <param name="tag">标签</param>
-    void SetError(Exception ex, Object tag);
+    /// <summary>错误信息。记录异常消息</summary>
+    String? Error { get; set; }
 
-    /// <summary>设置数据标签。内部根据长度截断</summary>
-    /// <param name="tag">标签</param>
+    /// <summary>设置错误信息，ApiException除外</summary>
+    /// <param name="ex">异常对象</param>
+    /// <param name="tag">附加数据标签</param>
+    void SetError(Exception ex, Object? tag = null);
+
+    /// <summary>设置数据标签。内部根据最大长度截断</summary>
+    /// <param name="tag">标签数据，可以是字符串、对象等</param>
     void SetTag(Object tag);
+
+    /// <summary>抛弃埋点，不计入采集</summary>
+    /// <remarks>在Web应用中，经常遇到各种扫描，导致记录大量并不存在的异常埋点，此时需要抛弃这些404埋点</remarks>
+    void Abandon();
 }
 
 /// <summary>性能跟踪片段。轻量级APM</summary>
@@ -52,18 +65,50 @@ public interface ISpan : IDisposable
 public class DefaultSpan : ISpan
 {
     #region 属性
-    /// <summary>构建器</summary>
+    /// <summary>跟踪器</summary>
     [XmlIgnore, ScriptIgnore, IgnoreDataMember]
-    public ISpanBuilder Builder { get; private set; }
+    public ITracer? Tracer { get; set; }
 
+    private String? _id;
     /// <summary>唯一标识。随线程上下文、Http、Rpc传递，作为内部片段的父级</summary>
-    public String Id { get; set; }
+    /// <remarks>延迟生成，首次读取时才创建。绝大多数埋点并未采样，无需为其付出标识字符串的分配</remarks>
+    public String Id
+    {
+        get
+        {
+            var id = _id;
+            if (id != null) return id;
+
+            id = CreateId();
+            // 同一片段可能被并行分支共享，以先写入者为准，保证对外呈现同一个Id
+            return Interlocked.CompareExchange(ref _id, id, null) ?? id;
+        }
+        set => _id = value;
+    }
+
+    /// <summary>埋点名</summary>
+    [XmlIgnore, ScriptIgnore, IgnoreDataMember]
+    public String Name { get; set; } = null!;
 
     /// <summary>父级片段标识</summary>
-    public String ParentId { get; set; }
+    public String? ParentId { get; set; }
 
+    private String? _traceId;
     /// <summary>跟踪标识。可用于关联多个片段，建立依赖关系，随线程上下文、Http、Rpc传递</summary>
-    public String TraceId { get; set; }
+    /// <remarks>延迟生成，首次读取时才创建</remarks>
+    public String TraceId
+    {
+        get
+        {
+            var traceId = _traceId;
+            if (traceId != null) return traceId;
+
+            traceId = CreateTraceId();
+            // 同一片段可能被并行分支共享，以先写入者为准，保证同一链路的子片段拿到同一个TraceId
+            return Interlocked.CompareExchange(ref _traceId, traceId, null) ?? traceId;
+        }
+        set => _traceId = value;
+    }
 
     /// <summary>开始时间。Unix毫秒</summary>
     public Int64 StartTime { get; set; }
@@ -71,27 +116,27 @@ public class DefaultSpan : ISpan
     /// <summary>结束时间。Unix毫秒</summary>
     public Int64 EndTime { get; set; }
 
-    /// <summary>数据标签。记录一些附加数据</summary>
-    public String Tag { get; set; }
+    /// <summary>用户数值。记录数字型标量，如每次数据库操作行数，星尘平台汇总统计</summary>
+    public Int64 Value { get; set; }
 
-    ///// <summary>版本</summary>
-    //public Byte Version { get; set; }
+    /// <summary>数据标签。记录一些附加数据</summary>
+    public String? Tag { get; set; }
 
     /// <summary>跟踪标识。强制采样，确保链路采样完整，上下文传递</summary>
     public Byte TraceFlag { get; set; }
 
     /// <summary>错误信息</summary>
-    public String Error { get; set; }
+    public String? Error { get; set; }
 
 #if NET45
-    private static readonly ThreadLocal<ISpan> _Current = new();
+    private static readonly ThreadLocal<ISpan?> _Current = new();
 #else
-    private static readonly AsyncLocal<ISpan> _Current = new();
+    private static readonly AsyncLocal<ISpan?> _Current = new();
 #endif
     /// <summary>当前线程正在使用的上下文</summary>
-    public static ISpan Current { get => _Current.Value; set => _Current.Value = value; }
+    public static ISpan? Current { get => _Current.Value; set => _Current.Value = value; }
 
-    private ISpan _parent;
+    private ISpan? _parent;
     private Int32 _finished;
     #endregion
 
@@ -100,16 +145,12 @@ public class DefaultSpan : ISpan
     public DefaultSpan() { }
 
     /// <summary>实例化</summary>
-    /// <param name="builder"></param>
-    public DefaultSpan(ISpanBuilder builder)
-    {
-        Builder = builder;
-        StartTime = DateTime.UtcNow.ToLong();
-    }
+    /// <param name="tracer"></param>
+    public DefaultSpan(ITracer tracer) => Tracer = tracer;
 
     static DefaultSpan()
     {
-        IPAddress ip;
+        IPAddress? ip;
         try
         {
             ip = NetHelper.MyIP();
@@ -118,7 +159,7 @@ public class DefaultSpan : ISpan
         {
             ip = IPAddress.Loopback;
         }
-        if (ip == null) ip = IPAddress.Parse("127.0.0.1");
+        ip ??= IPAddress.Parse("127.0.0.1");
         _myip = ip.GetAddressBytes().ToHex().ToLower().PadLeft(8, '0');
         var pid = Process.GetCurrentProcess().Id;
         _pid = (pid & 0xFFFF).ToString("x4").PadLeft(4, '0');
@@ -132,8 +173,9 @@ public class DefaultSpan : ISpan
     /// <summary>设置跟踪标识</summary>
     public virtual void Start()
     {
+        StartTime = Runtime.UtcNow.ToUnixTimeMilliseconds();
+
         //if (Id.IsNullOrEmpty()) Id = Rand.NextBytes(8).ToHex().ToLower();
-        if (Id.IsNullOrEmpty()) Id = CreateId();
 
         // 设置父级
         var span = Current;
@@ -146,9 +188,6 @@ public class DefaultSpan : ISpan
             // 继承跟踪标识，该TraceId下全量采样，确保链路采样完整
             if (span is DefaultSpan ds) TraceFlag = ds.TraceFlag;
         }
-
-        // 否则创建新的跟踪标识
-        if (TraceId.IsNullOrEmpty()) TraceId = CreateTraceId();
 
         // 设置当前片段
         Current = this;
@@ -165,10 +204,24 @@ public class DefaultSpan : ISpan
     {
         // IPv4(8) + PID(4) + 顺序数(4)
         var id = Interlocked.Increment(ref _seq) & 0xFFFF;
+#if NETCOREAPP || NETSTANDARD2_1_OR_GREATER
+        return String.Create(16, (Seq: id, Ip: _myip, Pid: _pid), (span, s) =>
+        {
+            s.Ip.AsSpan().CopyTo(span);
+            s.Pid.AsSpan().CopyTo(span[8..]);
+            WriteHex(span[12..], (UInt32)s.Seq, 4);
+        });
+#else
         return _myip + _pid + id.ToString("x4").PadLeft(4, '0');
+#endif
     }
 
     /// <summary>创建跟踪编号</summary>
+    /// <remarks>
+    /// 总长度固定为32位十六进制，以满足W3C TraceContext对trace-id的要求（30位会被标准解析器拒绝）。
+    /// 布局参考阿里云EagleEye全链路追踪，并增加IPv4与PID两个定位维度：
+    /// IPv4(8) + 毫秒时间(13) + 顺序数(6) + 标识位(1) + PID(4) = 32
+    /// </remarks>
     /// <returns></returns>
     protected virtual String CreateTraceId()
     {
@@ -177,72 +230,183 @@ public class DefaultSpan : ISpan
          * 7ae122a215982779017518707e
          * IPv4(8) + 毫秒时间(13) + 顺序数(4) + 标识位(1) + PID(4)
          * 7ae122a2 + 1598277901751 + 8707 + e
+         *
+         * 为对齐W3C TraceContext，顺序数由4位扩展到6位，使总长度达到标准的32位。
+         * 毫秒时间为13位十进制，在公元2286年之前一直保持13位。
          */
 
-        var sb = Pool.StringBuilder.Get();
-        sb.Append(_myip);
-        sb.Append(DateTime.UtcNow.ToLong());
-        var id = Interlocked.Increment(ref _seq2) & 0xFFFF;
-        sb.Append(id.ToString("x4").PadLeft(4, '0'));
-        sb.Append('e');
-        sb.Append(_pid);
+        var ms = Runtime.UtcNow.ToUnixTimeMilliseconds();
+        var id = Interlocked.Increment(ref _seq2) & 0xFFFFFF;
 
         //return _myip + DateTime.UtcNow.ToLong() + Interlocked.Increment(ref _seq) + "e" + _pid;
-        return sb.Put(true);
+#if NETCOREAPP || NETSTANDARD2_1_OR_GREATER
+        return String.Create(32, (Seq: id, Ms: ms, Ip: _myip, Pid: _pid), (span, s) =>
+        {
+            s.Ip.AsSpan().CopyTo(span);
+            WriteDec(span[8..], s.Ms, 13);
+            WriteHex(span[21..], (UInt32)s.Seq, 6);
+            span[27] = 'e';
+            s.Pid.AsSpan().CopyTo(span[28..]);
+        });
+#else
+        var sb = Pool.StringBuilder.Get();
+        sb.Append(_myip);
+        sb.Append(ms);
+        sb.Append(id.ToString("x6").PadLeft(6, '0'));
+        sb.Append('e');
+        sb.Append(_pid);
+        return sb.Return(true);
+#endif
     }
+
+#if NETCOREAPP || NETSTANDARD2_1_OR_GREATER
+    /// <summary>把整数以小写十六进制右对齐写入字符区，左侧补零</summary>
+    /// <param name="span">目标字符区</param>
+    /// <param name="value">待写入数值</param>
+    /// <param name="digits">写入位数</param>
+    private static void WriteHex(Span<Char> span, UInt32 value, Int32 digits)
+    {
+        for (var i = digits - 1; i >= 0; i--)
+        {
+            var d = (Int32)(value & 0xF);
+            span[i] = (Char)(d < 10 ? '0' + d : 'a' + d - 10);
+            value >>= 4;
+        }
+    }
+
+    /// <summary>把整数以十进制右对齐写入字符区，左侧补零</summary>
+    /// <param name="span">目标字符区</param>
+    /// <param name="value">待写入数值</param>
+    /// <param name="digits">写入位数</param>
+    private static void WriteDec(Span<Char> span, Int64 value, Int32 digits)
+    {
+        for (var i = digits - 1; i >= 0; i--)
+        {
+            span[i] = (Char)('0' + (Int32)(value % 10));
+            value /= 10;
+        }
+    }
+#endif
 
     /// <summary>完成跟踪</summary>
     protected virtual void Finish()
     {
         if (Interlocked.CompareExchange(ref _finished, 1, 0) != 0) return;
 
-        EndTime = DateTime.UtcNow.ToLong();
+        EndTime = Runtime.UtcNow.ToUnixTimeMilliseconds();
 
         // 从本线程中清除跟踪标识
         Current = _parent;
 
-        // Builder这一批可能已经上传，重新取一次，以防万一
-        var builder = Builder.Tracer.BuildSpan(Builder.Name);
-        builder.Finish(this);
+        var tracer = Tracer;
+        if (tracer == null) return;
 
-        // 打断对Builder的引用，当前Span可能还被放在AsyncLocal字典中
-        // 也有可能原来的Builder已经上传，现在加入了新的builder集合
-        Builder = null;
+        var name = Name;
+        if (!name.IsNullOrEmpty())
+        {
+            //!!! Builder这一批可能已经上传，重新取一次，以防万一。如果在星尘平台没见到埋点数据，大概率是这里的问题
+            var builder = tracer.BuildSpan(name);
+            builder?.Finish(this);
+        }
     }
 
-    /// <summary>设置错误信息</summary>
+    /// <summary>抛弃埋点，不计入采集</summary>
+    /// <remarks>在Web应用中，经常遇到各种扫描，导致记录大量并不存在的异常埋点，此时需要抛弃这些404埋点</remarks>
+    public virtual void Abandon()
+    {
+        _finished = 1;
+        //Builder = null;
+
+        // 抛弃的片段同样要把上下文归还给父级，否则它会一直被 Current 持有，
+        // 同一异步上下文内后续埋点也会挂到这个永远不会上报的父级上
+        Current = _parent;
+
+        // 不能还给对象池，因为外部还有引用，Dispose尚未调用
+    }
+
+    /// <summary>设置错误信息，ApiException除外</summary>
     /// <param name="ex">异常</param>
     /// <param name="tag">标签</param>
-    public virtual void SetError(Exception ex, Object tag)
+    public virtual void SetError(Exception ex, Object? tag)
     {
-        Error = ex?.GetMessage();
-
         SetTag(tag);
+
+        if (ex != null)
+        {
+            var name = $"ex:{ex.GetType().Name}";
+
+            // 业务异常，不属于异常，而是正常流程
+            if (ex is ApiException aex)
+            {
+                name = $"ex:{ex.GetType().Name}[{aex.Code}]";
+                this.AppendTag($"Api[{aex.Code}]:{aex.Message}\r\n{aex.Source}");
+            }
+            else
+                Error = ex.GetMessage();
+
+            // 所有异常，独立记录埋点，便于按异常分类统计
+            using var span = Tracer?.NewSpan(name, tag);
+            span?.AppendTag(ex.GetMessage());
+            span?.StartTime = StartTime;
+        }
     }
 
     /// <summary>设置数据标签。内部根据长度截断</summary>
     /// <param name="tag">标签</param>
-    public virtual void SetTag(Object tag)
+    public virtual void SetTag(Object? tag)
     {
         if (tag == null) return;
 
-        var len = Builder?.Tracer?.MaxTagLength ?? 0;
+        // 优先使用 DefaultTracer 的 BuildTag 方法
+        if (Tracer is DefaultTracer defaultTracer)
+        {
+            // SetTag 总是需要处理所有类型的标签
+            defaultTracer.BuildTag(this, tag, true);
+            return;
+        }
+
+        // 降级处理：没有 DefaultTracer 时使用简单逻辑
+        var len = Tracer?.MaxTagLength ?? 1024;
         if (len <= 0) return;
 
         if (tag is String str)
             Tag = str.Cut(len);
         else if (tag is StringBuilder builder)
             Tag = builder.Length <= len ? builder.ToString() : builder.ToString(0, len);
-        else if (tag is Packet pk)
+        else if (tag is IPacket pk)
         {
             // 头尾是Xml/Json时，使用字符串格式
-            if (pk.Total >= 2 && (pk[0] == '{' || pk[0] == '<' || pk[pk.Total - 1] == '}' || pk[pk.Total - 1] == '>'))
+            var total = pk.Total;
+            if (total >= 2 && (pk[0] == '{' || pk[0] == '<' || pk[total - 1] == '}' || pk[total - 1] == '>'))
                 Tag = pk.ToStr(null, 0, len);
             else
                 Tag = pk.ToHex(len / 2);
+
+            if (Value == 0) Value = total;
         }
+        else if (Tracer is DefaultTracer defaultTracer2)
+            Tag = tag.ToJson(defaultTracer2.JsonOptions).Cut(len);
         else
             Tag = tag.ToJson().Cut(len);
+    }
+
+    /// <summary>清空已有数据</summary>
+    public void Clear()
+    {
+        Tracer = null;
+        Id = null!;
+        Name = null!;
+        ParentId = null;
+        TraceId = null!;
+        StartTime = 0;
+        EndTime = 0;
+        Value = 0;
+        Tag = null;
+        TraceFlag = 0;
+        Error = null;
+
+        _parent = null;
+        _finished = 0;
     }
 
     /// <summary>已重载。</summary>
@@ -255,10 +419,22 @@ public class DefaultSpan : ISpan
 public static class SpanExtension
 {
     #region 扩展方法
-    private static String GetAttachParameter(ISpan span)
+#if NET45
+    private static readonly DateTimeOffset _dt1970 = new(new DateTime(1970, 1, 1), TimeSpan.Zero);
+
+    /// <summary>取Unix毫秒时间戳。net45缺少该成员，在此补齐，避免走 UtcNow.ToLong() 的装箱分配</summary>
+    /// <param name="dto">时间</param>
+    /// <returns></returns>
+    internal static Int64 ToUnixTimeMilliseconds(this DateTimeOffset dto) => (Int64)(dto - _dt1970).TotalMilliseconds;
+#endif
+
+    private static String? GetAttachParameter(ISpan span)
     {
-        var builder = (span as DefaultSpan)?.Builder;
-        var tracer = (builder as DefaultSpanBuilder)?.Tracer;
+        var tracer = (span as DefaultSpan)?.Tracer;
+#if NET6_0_OR_GREATER
+        // OpenTelemetry 档的片段不是 DefaultSpan，需单独取跟踪器，否则出站请求不会注入 traceparent，跨进程链路断开
+        tracer ??= (span as OpenTelemetrySpan)?.Tracer;
+#endif
         return tracer?.AttachParameter;
     }
 
@@ -268,7 +444,7 @@ public static class SpanExtension
     /// <returns></returns>
     public static HttpRequestMessage Attach(this ISpan span, HttpRequestMessage request)
     {
-        if (span == null || request == null) return request;
+        //if (span == null || request == null) return request;
 
         // 注入参数名
         var name = GetAttachParameter(span);
@@ -280,22 +456,22 @@ public static class SpanExtension
         return request;
     }
 
-    ///// <summary>把片段信息附加到http请求头上</summary>
-    ///// <param name="span">片段</param>
-    ///// <param name="headers">http请求头</param>
-    ///// <returns></returns>
-    //public static HttpRequestHeaders Attach(this ISpan span, HttpRequestHeaders headers)
-    //{
-    //    if (span == null || headers == null) return headers;
+    /// <summary>把片段信息附加到http请求头上</summary>
+    /// <param name="span">片段</param>
+    /// <param name="headers">http请求头</param>
+    /// <returns></returns>
+    public static IDictionary<String, String> Attach(this ISpan span, IDictionary<String, String> headers)
+    {
+        //if (span == null || headers == null) return headers;
 
-    //    // 注入参数名
-    //    var name = GetAttachParameter(span);
-    //    if (name.IsNullOrEmpty()) return headers;
+        // 注入参数名
+        var name = GetAttachParameter(span);
+        if (name.IsNullOrEmpty()) return headers;
 
-    //    if (!headers.Contains(name)) headers.Add(name, span.ToString());
+        if (!headers.ContainsKey(name)) headers.Add(name, span.ToString()!);
 
-    //    return headers;
-    //}
+        return headers;
+    }
 
     /// <summary>把片段信息附加到http请求头上</summary>
     /// <param name="span">片段</param>
@@ -303,7 +479,7 @@ public static class SpanExtension
     /// <returns></returns>
     public static WebRequest Attach(this ISpan span, WebRequest request)
     {
-        if (span == null || request == null) return request;
+        //if (span == null || request == null) return request;
 
         // 注入参数名
         var name = GetAttachParameter(span);
@@ -319,10 +495,20 @@ public static class SpanExtension
     /// <param name="span">片段</param>
     /// <param name="args">api请求参数</param>
     /// <returns></returns>
-    public static Object Attach(this ISpan span, Object args)
+    [return: NotNullIfNotNull(nameof(args))]
+    public static Object? Attach(this ISpan span, Object? args)
     {
-        if (span == null || args == null || args is Packet || args is Byte[] || args is IAccessor) return args;
-        if (Type.GetTypeCode(args.GetType()) != TypeCode.Object) return args;
+        if (span == null || args == null || args is IPacket || args is Byte[] || args is IAccessor) return args;
+
+        if (args is ITraceMessage tm)
+        {
+            if (!tm.TraceId.IsNullOrEmpty()) tm.TraceId = span.ToString();
+            return args;
+        }
+
+        var type = args.GetType();
+        if (type.IsArray || type.IsValueType || type == typeof(String)) return args;
+        if (type.IsBaseType()) return args;
 
         // 注入参数名
         var name = GetAttachParameter(span);
@@ -342,10 +528,10 @@ public static class SpanExtension
         if (span == null || headers == null || headers.Count == 0) return;
 
         // 不区分大小写比较头部
-        var dic = new Dictionary<String, String>(StringComparer.OrdinalIgnoreCase);
+        var dic = new Dictionary<String, String?>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in headers.AllKeys)
         {
-            dic[item] = headers[item];
+            if (item != null) dic[item] = headers[item];
         }
 
         Detach2(span, dic);
@@ -354,7 +540,7 @@ public static class SpanExtension
     /// <summary>从api请求释放片段信息</summary>
     /// <param name="span">片段</param>
     /// <param name="parameters">参数</param>
-    public static void Detach(this ISpan span, IDictionary<String, Object> parameters)
+    public static void Detach(this ISpan span, IDictionary<String, Object?> parameters)
     {
         if (span == null || parameters == null || parameters.Count == 0) return;
 
@@ -411,11 +597,12 @@ public static class SpanExtension
     /// <summary>从数据流traceId中释放片段信息</summary>
     /// <param name="span">片段</param>
     /// <param name="traceId">W3C标准TraceId，可以是traceparent</param>
-    public static void Detach(this ISpan span, String traceId)
+    public static void Detach(this ISpan span, String? traceId)
     {
         if (span == null || traceId.IsNullOrEmpty()) return;
 
         var ss = traceId.Split('-');
+        if (ss.Length == 1) span.TraceId = ss[0];
         if (ss.Length > 1) span.TraceId = ss[1];
         if (ss.Length > 2) span.ParentId = ss[2];
 
@@ -434,15 +621,29 @@ public static class SpanExtension
     {
         if (span == null || tag == null) return;
 
-        if (span is DefaultSpan ds && ds.TraceFlag > 0)
+        AppendTag(span, tag, -1);
+    }
+
+    /// <summary>附加Tag信息在原Tag信息后面</summary>
+    /// <param name="span">片段</param>
+    /// <param name="tag">Tag信息</param>
+    /// <param name="value">可累加的数值标量</param>
+    public static void AppendTag(this ISpan span, Object tag, Int64 value)
+    {
+        if (span == null) return;
+
+        if (value >= 0) span.Value = value;
+
+        if (tag != null && span is DefaultSpan ds && ds.TraceFlag > 0)
         {
+            var maxLength = ds.Tracer?.MaxTagLength ?? 1024;
             if (span.Tag.IsNullOrEmpty())
                 span.SetTag(tag);
-            else if (span.Tag.Length < 1024)
+            else if (span.Tag.Length < maxLength)
             {
                 var old = span.Tag;
                 span.SetTag(tag);
-                span.Tag = (old + "\r\n\r\n" + span.Tag).Cut(1024);
+                span.Tag = (old + "\r\n" + span.Tag).Cut(maxLength);
             }
         }
     }
@@ -455,17 +656,23 @@ public static class SpanExtension
         // 正常响应，部分作为Tag信息
         if (response.StatusCode == HttpStatusCode.OK)
         {
-            if (span is DefaultSpan ds && ds.TraceFlag > 0 && (span.Tag.IsNullOrEmpty() || span.Tag.Length < 1024))
+            var content = response.Content;
+            var len = content.Headers?.ContentLength ?? 0;
+            if (span.Value == 0) span.Value = len;
+
+            if (span is DefaultSpan ds && ds.TraceFlag > 0)
             {
-                // 判断类型和长度
-                var content = response.Content;
-                var mediaType = content.Headers?.ContentType?.MediaType;
-                var len = content.Headers?.ContentLength ?? 0;
-                if (len >= 0 && len < 1024 && mediaType.EndsWithIgnoreCase("json", "xml", "text", "html"))
+                var maxLength = ds.Tracer?.MaxTagLength ?? 1024;
+                if (span.Tag.IsNullOrEmpty() || span.Tag.Length < maxLength)
                 {
-                    var result = content.ReadAsStringAsync().Result;
-                    if (!result.IsNullOrEmpty())
-                        span.Tag = (span.Tag + "\r\n\r\n" + result).Cut(1024);
+                    // 判断类型和长度
+                    var mediaType = content.Headers?.ContentType?.MediaType;
+                    if (len >= 0 && len < 1024 * 8 && mediaType.EndsWithIgnoreCase("json", "xml", "text", "html"))
+                    {
+                        var result = content.ReadAsStringAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+                        if (!result.IsNullOrEmpty())
+                            span.Tag = (span.Tag + "\r\n" + result).Cut(maxLength);
+                    }
                 }
             }
         }

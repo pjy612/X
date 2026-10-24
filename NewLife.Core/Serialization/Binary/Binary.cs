@@ -1,4 +1,9 @@
-﻿using System.Reflection;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using NewLife.Buffers;
+using NewLife.Collections;
 using NewLife.Data;
 using NewLife.Reflection;
 
@@ -27,13 +32,23 @@ public class Binary : FormatterBase, IBinary
     public Boolean TrimZero { get; set; }
 
     /// <summary>协议版本。用于支持多版本协议序列化，配合FieldSize特性使用。例如JT/T808的2011/2019</summary>
-    public String Version { get; set; }
+    public String? Version { get; set; }
+
+    /// <summary>使用完整的时间格式。完整格式使用8个字节保存毫秒数，默认false</summary>
+    public Boolean FullTime { get; set; }
 
     /// <summary>要忽略的成员</summary>
-    public ICollection<String> IgnoreMembers { get; set; } = new HashSet<String>();
+    public ICollection<String> IgnoreMembers { get; set; } = [];
 
     /// <summary>处理器列表</summary>
     public IList<IBinaryHandler> Handlers { get; private set; }
+
+    /// <summary>是否已达到数据流末尾</summary>
+    /// <remarks>该类内部与外部均可设置，例如IAccessor中可设置EOF</remarks>
+    public Boolean EndOfStream { get; set; }
+
+    /// <summary>总的字节数。读取或写入</summary>
+    public Int64 Total { get; set; }
     #endregion
 
     #region 构造
@@ -51,6 +66,12 @@ public class Binary : FormatterBase, IBinary
         };
         // 根据优先级排序
         Handlers = list.OrderBy(e => e.Priority).ToList();
+    }
+
+    /// <summary>实例化</summary>
+    public Binary(Stream stream) : this()
+    {
+        Stream = stream ?? throw new ArgumentNullException(nameof(stream));
     }
     #endregion
 
@@ -89,7 +110,7 @@ public class Binary : FormatterBase, IBinary
     /// <summary>获取处理器</summary>
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
-    public T GetHandler<T>() where T : class, IBinaryHandler
+    public T? GetHandler<T>() where T : class, IBinaryHandler
     {
         foreach (var item in Handlers)
         {
@@ -105,7 +126,7 @@ public class Binary : FormatterBase, IBinary
     /// <param name="value">目标对象</param>
     /// <param name="type">类型</param>
     /// <returns></returns>
-    public virtual Boolean Write(Object value, Type type = null)
+    public virtual Boolean Write(Object? value, Type? type = null)
     {
         if (type == null)
         {
@@ -115,6 +136,23 @@ public class Binary : FormatterBase, IBinary
 
             // 一般类型为空是顶级调用
             if (Hosts.Count == 0 && Log != null && Log.Enable) WriteLog("BinaryWrite {0} {1}", type.Name, value);
+        }
+
+        // 优先 ISpanSerializable 接口（高性能Span序列化）
+        if (value is ISpanSerializable spanW)
+        {
+            using var pk = new OwnerPacket(4096);
+            var writer = new SpanWriter(pk.GetSpan(), Stream)
+            {
+                IsLittleEndian = IsLittleEndian,
+                EncodeInt = EncodeInt,
+                FullTime = FullTime,
+            };
+            spanW.Write(ref writer);
+            writer.Dispose();
+            Total += writer.TotalWritten;
+
+            return true;
         }
 
         // 优先 IAccessor 接口
@@ -132,7 +170,12 @@ public class Binary : FormatterBase, IBinary
 
     /// <summary>写入字节</summary>
     /// <param name="value"></param>
-    public virtual void Write(Byte value) => Stream.WriteByte(value);
+    public virtual void Write(Byte value)
+    {
+        Stream.WriteByte(value);
+
+        Total++;
+    }
 
     /// <summary>将字节数组部分写入当前流，不写入数组长度。</summary>
     /// <param name="buffer">包含要写入的数据的字节数组。</param>
@@ -142,6 +185,39 @@ public class Binary : FormatterBase, IBinary
     {
         if (count < 0) count = buffer.Length - offset;
         Stream.Write(buffer, offset, count);
+
+        Total += count;
+    }
+
+    /// <summary>写入数据</summary>
+    /// <param name="buffer"></param>
+    public virtual void Write(ReadOnlySpan<Byte> buffer)
+    {
+#if NETCOREAPP || NETSTANDARD2_1_OR_GREATER
+        Stream.Write(buffer);
+#else
+        using var array = Pool.Rent(buffer.Length);
+
+        buffer.CopyTo(array);
+
+        Stream.Write(array, 0, buffer.Length);
+#endif
+        Total += buffer.Length;
+    }
+
+    /// <summary>写入数据</summary>
+    /// <param name="buffer"></param>
+    public virtual void Write(ReadOnlyMemory<Byte> buffer)
+    {
+        if (MemoryMarshal.TryGetArray(buffer, out var segment))
+        {
+            Stream.Write(segment.Array!, segment.Offset, segment.Count);
+            Total += segment.Count;
+
+            return;
+        }
+
+        Write(buffer.Span);
     }
 
     /// <summary>写入大小，如果有FieldSize则返回，否则写入编码的大小并返回-1</summary>
@@ -149,9 +225,11 @@ public class Binary : FormatterBase, IBinary
     /// <returns></returns>
     public virtual Int32 WriteSize(Int32 size)
     {
-        if (UseFieldSize && TryGetFieldSize(out var fieldsize)) return fieldsize;
+        var sizeWidth = -1;
+        if (UseFieldSize && TryGetFieldSize(out var fieldsize, out sizeWidth)) return fieldsize;
 
-        switch (SizeWidth)
+        if (sizeWidth < 0) sizeWidth = SizeWidth;
+        switch (sizeWidth)
         {
             case 1:
                 Write((Byte)size);
@@ -170,19 +248,16 @@ public class Binary : FormatterBase, IBinary
 
         return -1;
     }
-
-    [ThreadStatic]
-    private static Byte[] _encodes;
     #endregion
 
     #region 读取
     /// <summary>读取指定类型对象</summary>
     /// <param name="type"></param>
     /// <returns></returns>
-    public virtual Object Read(Type type)
+    public virtual Object? Read(Type type)
     {
-        Object value = null;
-        if (!TryRead(type, ref value)) throw new Exception($"读取失败，不支持类型{type}！");
+        Object? value = null;
+        if (!TryRead(type, ref value)) throw new Exception(L.T("Read failed, type {0} is not supported!", type));
 
         return value;
     }
@@ -190,15 +265,33 @@ public class Binary : FormatterBase, IBinary
     /// <summary>读取指定类型对象</summary>
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
-    public T Read<T>() => (T)Read(typeof(T));
+    public T? Read<T>() => (T?)Read(typeof(T));
 
     /// <summary>尝试读取指定类型对象</summary>
     /// <param name="type"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public virtual Boolean TryRead(Type type, ref Object value)
+    public virtual Boolean TryRead(Type type, [NotNullWhen(true)] ref Object? value)
     {
         if (Hosts.Count == 0 && Log != null && Log.Enable) WriteLog("BinaryRead {0} {1}", type.Name, value);
+
+        if (EndOfStream) return false;
+
+        // 优先 ISpanSerializable 接口（高性能Span序列化）
+        if (value is ISpanSerializable spanR)
+        {
+            ReadSpanSerializable(spanR);
+            return true;
+        }
+        if (value == null && type.As<ISpanSerializable>())
+        {
+            value = type.CreateInstance();
+            if (value is ISpanSerializable spanR2)
+            {
+                ReadSpanSerializable(spanR2);
+                return true;
+            }
+        }
 
         // 优先 IAccessor 接口
         if (value is IAccessor acc)
@@ -216,7 +309,10 @@ public class Binary : FormatterBase, IBinary
 
         foreach (var item in Handlers)
         {
-            if (item.TryRead(type, ref value)) return true;
+            if (item.TryRead(type, ref value!)) return true;
+
+            // TryRead 失败时，可能是数据流不足
+            if (EndOfStream) return false;
         }
         return false;
     }
@@ -225,40 +321,216 @@ public class Binary : FormatterBase, IBinary
     /// <returns></returns>
     public virtual Byte ReadByte()
     {
+        if (EndOfStream) throw new EndOfStreamException(L.T("The data stream is out of range!"));
+
         var b = Stream.ReadByte();
-        if (b < 0) throw new Exception("数据流超出范围！");
+        if (b < 0)
+        {
+            EndOfStream = true;
+            throw new EndOfStreamException(L.T("The data stream is out of range!"));
+        }
+
+        // 探测数据流是否已经到达末尾
+        var ms = Stream;
+        if (ms.CanSeek && ms.Position >= ms.Length) EndOfStream = true;
+
+        Total++;
+
         return (Byte)b;
     }
 
-    /// <summary>从当前流中将 count 个字节读入字节数组</summary>
-    /// <param name="count">要读取的字节数。</param>
+    /// <summary>尝试从当前流中读取一个字节</summary>
+    /// <param name="value"></param>
     /// <returns></returns>
+    public virtual Boolean TryReadByte(out Byte value)
+    {
+        value = 0;
+        if (EndOfStream) return false;
+
+        var b = Stream.ReadByte();
+        if (b < 0)
+        {
+            EndOfStream = true;
+            return false;
+        }
+
+        // 探测数据流是否已经到达末尾
+        var ms = Stream;
+        if (ms.CanSeek && ms.Position >= ms.Length) EndOfStream = true;
+
+        value = (Byte)b;
+        Total++;
+
+        return true;
+    }
+
+    /// <summary>从当前流中将 count 个字节读入字节数组</summary>
+    /// <param name="count">要读取的字节数。-1表示读取到末尾</param>
+    /// <returns>要读取的字节数组。数据到达末尾时返回空数据</returns>
     public virtual Byte[] ReadBytes(Int32 count)
     {
-        var buffer = Stream.ReadBytes(count);
+        if (count == 0) return [];
+
+        if (EndOfStream) throw new EndOfStreamException(L.T("The data stream is out of range!"));
+
+        // 如果是-1，则读取全部剩余数据
+        if (count < 0)
+        {
+            var buf = Stream.ReadBytes(-1);
+            Total += buf.Length;
+            return buf;
+        }
+
+        var buffer = new Byte[count];
+        var totalRead = 0;
+        while (totalRead < count)
+        {
+            var bytesRead = Stream.Read(buffer, totalRead, count - totalRead);
+            if (bytesRead <= 0)
+            {
+                Total += totalRead;
+                EndOfStream = true;
+                //throw new EndOfStreamException("The data stream is out of range!");
+                return totalRead > 0 ? buffer : [];
+            }
+            //if (bytesRead == 0) break;
+
+            totalRead += bytesRead;
+        }
+        Total += totalRead;
+
+        // 探测数据流是否已经到达末尾
+        var ms = Stream;
+        if (ms.CanSeek && ms.Position >= ms.Length) EndOfStream = true;
+
+        //Stream.ReadExactly(buffer, 0, buffer.Length);
+        //var buffer = Stream.ReadBytes(count);
         //if (n != count) throw new InvalidDataException($"数据不足，需要{count}，实际{n}");
+        //Total += buffer.Length;
 
         return buffer;
+    }
+
+    /// <summary>从当前流中读取字节数组</summary>
+    /// <param name="span">字节数组</param>
+    /// <returns></returns>
+    public virtual Int32 ReadBytes(Span<Byte> span)
+    {
+        if (span.Length == 0) return 0;
+
+        if (EndOfStream) throw new EndOfStreamException(L.T("The data stream is out of range!"));
+
+        var totalRead = 0;
+        while (totalRead < span.Length)
+        {
+            var bytesRead = ReadToSpan(Stream, span.Slice(totalRead));
+            if (bytesRead <= 0)
+            {
+                Total += totalRead;
+                EndOfStream = true;
+                return totalRead;
+            }
+
+            totalRead += bytesRead;
+        }
+        Total += totalRead;
+
+        // 探测数据流是否已经到达末尾
+        var ms = Stream;
+        if (ms.CanSeek && ms.Position >= ms.Length) EndOfStream = true;
+
+        return totalRead;
+    }
+
+    /// <summary>从当前流中读取字节数组</summary>
+    /// <param name="buffer">字节数组</param>
+    /// <param name="offset">偏移量</param>
+    /// <param name="count">个数</param>
+    /// <returns></returns>
+    public virtual Int32 ReadBytes(Byte[] buffer, Int32 offset, Int32 count)
+    {
+        if (count == 0) return 0;
+
+        if (EndOfStream) throw new EndOfStreamException(L.T("The data stream is out of range!"));
+
+        var totalRead = 0;
+        while (totalRead < count)
+        {
+            var bytesRead = Stream.Read(buffer, offset + totalRead, count - totalRead);
+            if (bytesRead <= 0)
+            {
+                Total += totalRead;
+                EndOfStream = true;
+                return totalRead;
+            }
+
+            totalRead += bytesRead;
+        }
+        Total += totalRead;
+
+        // 探测数据流是否已经到达末尾
+        var ms = Stream;
+        if (ms.CanSeek && ms.Position >= ms.Length) EndOfStream = true;
+
+        return totalRead;
     }
 
     /// <summary>读取大小</summary>
     /// <returns></returns>
     public virtual Int32 ReadSize()
     {
-        if (UseFieldSize && TryGetFieldSize(out var size)) return size;
+        var sizeWidth = -1;
+        if (UseFieldSize && TryGetFieldSize(out var size, out sizeWidth)) return size;
 
-        return SizeWidth switch
+        if (sizeWidth < 0) sizeWidth = SizeWidth;
+        return sizeWidth switch
         {
             1 => ReadByte(),
-            2 => (Int16)Read(typeof(Int16)),
-            4 => (Int32)Read(typeof(Int32)),
+            2 => (Int16)(Read(typeof(Int16)) ?? 0),
+            4 => (Int32)(Read(typeof(Int32)) ?? 0),
             0 => ReadEncodedInt32(),
             _ => -1,
         };
     }
 
-    private Boolean TryGetFieldSize(out Int32 size)
+    /// <summary>读取大小</summary>
+    /// <returns></returns>
+    public virtual Boolean TryReadSize(out Int32 value)
     {
+        value = 0;
+        var sizeWidth = -1;
+        if (UseFieldSize && TryGetFieldSize(out value, out sizeWidth)) return true;
+
+        if (sizeWidth < 0) sizeWidth = SizeWidth;
+        switch (sizeWidth)
+        {
+            case 1:
+                if (!TryReadByte(out var b)) return false;
+                value = b;
+                break;
+            case 2:
+                Object? n16 = null;
+                if (!TryRead(typeof(Int16), ref n16)) return false;
+                value = (Int16)n16;
+                break;
+            case 4:
+                Object? n32 = null;
+                if (!TryRead(typeof(Int32), ref n32)) return false;
+                value = (Int32)n32;
+                break;
+            case 0:
+                if (!TryReadEncodedInt32(out value)) return false;
+                break;
+            default:
+                value = -1;
+                break;
+        }
+        return true;
+    }
+
+    private Boolean TryGetFieldSize(out Int32 size, out Int32 sizeWidth)
+    {
+        sizeWidth = -1;
         if (Member is MemberInfo member)
         {
             // 获取FieldSizeAttribute特性
@@ -270,17 +542,20 @@ public class Binary : FormatterBase, IBinary
                     // 检查版本是否匹配
                     if (att.Version.IsNullOrEmpty() || att.Version == Version)
                     {
-                        // 如果指定了固定大小，直接返回
-                        if (att.ReferenceName.IsNullOrEmpty())
-                        {
-                            size = att.Size;
-                            if (size > 0) return true;
-                        }
-
                         // 如果指定了引用字段，则找引用字段所表示的长度
-                        if (att.TryGetReferenceSize(Hosts.Peek(), member, out size))
-                        {
+                        var target = Hosts.Peek();
+                        if (!att.ReferenceName.IsNullOrEmpty() && target != null && att.TryGetReferenceSize(target, member, out size))
                             return true;
+
+                        // 如果指定了固定大小，直接返回
+                        size = att.Size;
+                        if (size > 0) return true;
+
+                        // 指定了大小位宽
+                        if (att.SizeWidth >= 0)
+                        {
+                            sizeWidth = att.SizeWidth;
+                            return false;
                         }
                     }
                 }
@@ -293,6 +568,33 @@ public class Binary : FormatterBase, IBinary
     #endregion
 
     #region 7位压缩编码整数
+    [ThreadStatic]
+    private static Byte[]? _encodes;
+    /// <summary>写7位压缩编码整数</summary>
+    /// <remarks>
+    /// 以7位压缩格式写入32位整数，小于7位用1个字节，小于14位用2个字节。
+    /// 由每次写入的一个字节的第一位标记后面的字节是否还是当前数据，所以每个字节实际可利用存储空间只有后7位。
+    /// </remarks>
+    /// <param name="value">数值</param>
+    /// <returns>实际写入字节数</returns>
+    public Int32 WriteEncoded(Int16 value)
+    {
+        _encodes ??= new Byte[16];
+
+        var count = 0;
+        var num = (UInt16)value;
+        while (num >= 0x80)
+        {
+            _encodes[count++] = (Byte)(num | 0x80);
+            num >>= 7;
+        }
+        _encodes[count++] = (Byte)num;
+
+        Write(_encodes, 0, count);
+
+        return count;
+    }
+
     /// <summary>写7位压缩编码整数</summary>
     /// <remarks>
     /// 以7位压缩格式写入32位整数，小于7位用1个字节，小于14位用2个字节。
@@ -302,10 +604,35 @@ public class Binary : FormatterBase, IBinary
     /// <returns>实际写入字节数</returns>
     public Int32 WriteEncoded(Int32 value)
     {
-        if (_encodes == null) _encodes = new Byte[16];
+        _encodes ??= new Byte[16];
 
         var count = 0;
         var num = (UInt32)value;
+        while (num >= 0x80)
+        {
+            _encodes[count++] = (Byte)(num | 0x80);
+            num >>= 7;
+        }
+        _encodes[count++] = (Byte)num;
+
+        Write(_encodes, 0, count);
+
+        return count;
+    }
+
+    /// <summary>写7位压缩编码整数</summary>
+    /// <remarks>
+    /// 以7位压缩格式写入32位整数，小于7位用1个字节，小于14位用2个字节。
+    /// 由每次写入的一个字节的第一位标记后面的字节是否还是当前数据，所以每个字节实际可利用存储空间只有后7位。
+    /// </remarks>
+    /// <param name="value">数值</param>
+    /// <returns>实际写入字节数</returns>
+    public Int32 WriteEncoded(Int64 value)
+    {
+        _encodes ??= new Byte[16];
+
+        var count = 0;
+        var num = (UInt64)value;
         while (num >= 0x80)
         {
             _encodes[count++] = (Byte)(num | 0x80);
@@ -327,13 +654,14 @@ public class Binary : FormatterBase, IBinary
         Byte n = 0;
         while (true)
         {
-            b = ReadByte();
+            //b = ReadByte();
+            if (!TryReadByte(out b)) break;
             // 必须转为Int16，否则可能溢出
             rs += (Int16)((b & 0x7f) << n);
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 16) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 16) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return rs;
     }
@@ -347,13 +675,14 @@ public class Binary : FormatterBase, IBinary
         Byte n = 0;
         while (true)
         {
-            b = ReadByte();
+            //b = ReadByte();
+            if (!TryReadByte(out b)) break;
             // 必须转为Int32，否则可能溢出
             rs += (b & 0x7f) << n;
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 32) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 32) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return rs;
     }
@@ -367,15 +696,79 @@ public class Binary : FormatterBase, IBinary
         Byte n = 0;
         while (true)
         {
-            b = ReadByte();
+            //b = ReadByte();
+            if (!TryReadByte(out b)) break;
             // 必须转为Int64，否则可能溢出
             rs += (Int64)(b & 0x7f) << n;
             if ((b & 0x80) == 0) break;
 
             n += 7;
-            if (n >= 64) throw new FormatException("数字值过大，无法使用压缩格式读取！");
+            if (n >= 64) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
         }
         return rs;
+    }
+
+    /// <summary>以压缩格式读取16位整数</summary>
+    /// <returns></returns>
+    public Boolean TryReadEncodedInt16(out Int16 value)
+    {
+        Byte b;
+        Byte n = 0;
+        value = 0;
+        while (true)
+        {
+            if (!TryReadByte(out b)) return false;
+
+            // 必须转为Int16，否则可能溢出
+            value += (Int16)((b & 0x7f) << n);
+            if ((b & 0x80) == 0) break;
+
+            n += 7;
+            if (n >= 16) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
+        }
+        return true;
+    }
+
+    /// <summary>以压缩格式读取32位整数</summary>
+    /// <returns></returns>
+    public Boolean TryReadEncodedInt32(out Int32 value)
+    {
+        Byte b;
+        Byte n = 0;
+        value = 0;
+        while (true)
+        {
+            if (!TryReadByte(out b)) return false;
+
+            // 必须转为Int32，否则可能溢出
+            value += (b & 0x7f) << n;
+            if ((b & 0x80) == 0) break;
+
+            n += 7;
+            if (n >= 32) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
+        }
+        return true;
+    }
+
+    /// <summary>以压缩格式读取64位整数</summary>
+    /// <returns></returns>
+    public Boolean TryReadEncodedInt64(out Int64 value)
+    {
+        Byte b;
+        Byte n = 0;
+        value = 0;
+        while (true)
+        {
+            if (!TryReadByte(out b)) return false;
+
+            // 必须转为Int64，否则可能溢出
+            value += (Int64)(b & 0x7f) << n;
+            if ((b & 0x80) == 0) break;
+
+            n += 7;
+            if (n >= 64) throw new FormatException(L.T("The number value is too large to read in compressed format!"));
+        }
+        return true;
     }
     #endregion
 
@@ -432,6 +825,8 @@ public class Binary : FormatterBase, IBinary
     public String ReadBCD(Int32 len)
     {
         var buf = ReadBytes(len);
+        if (buf.Length == 0) return String.Empty;
+
         var cs = new Char[len * 2];
         for (var i = 0; i < len; i++)
         {
@@ -447,7 +842,8 @@ public class Binary : FormatterBase, IBinary
     /// <param name="max"></param>
     public void WriteBCD(String value, Int32 max)
     {
-        var buf = new Byte[max];
+        using var buf = Pool.Rent(max);
+
         for (Int32 i = 0, j = 0; i < max && j + 1 < value.Length; i++, j += 2)
         {
             var a = (Byte)(value[j] - '0');
@@ -455,18 +851,23 @@ public class Binary : FormatterBase, IBinary
             buf[i] = (Byte)((a << 4) | (b & 0x0F));
         }
 
-        Write(buf, 0, buf.Length);
+        Write(buf, 0, max);
     }
 
     /// <summary>写入定长字符串。多余截取，少则补零</summary>
     /// <param name="value"></param>
     /// <param name="max"></param>
-    public void WriteFixedString(String value, Int32 max)
+    public void WriteFixedString(String? value, Int32 max)
     {
-        var buf = new Byte[max];
-        if (!value.IsNullOrEmpty()) Encoding.GetBytes(value, 0, value.Length, buf, 0);
+        var len = 0;
+        using var buf = Pool.Rent(max);
 
-        Write(buf, 0, buf.Length);
+        if (!value.IsNullOrEmpty()) len = Encoding.GetBytes(value, 0, value.Length, buf, 0);
+
+        // 清空空白部分，避免出现脏数据
+        if (len < max) Array.Clear(buf, len, max - len);
+
+        Write(buf, 0, max);
     }
 
     /// <summary>读取定长字符串。多余截取，少则补零</summary>
@@ -475,30 +876,102 @@ public class Binary : FormatterBase, IBinary
     public String ReadFixedString(Int32 len)
     {
         var buf = ReadBytes(len);
+        if (buf.Length == 0) return String.Empty;
+
+        // 得到实际长度，在读取-1全部字符串时也能剔除首尾的0x00和0xFF
+        if (len < 0) len = buf.Length;
 
         // 剔除头尾非法字符
         Int32 s, e;
         for (s = 0; s < len && (buf[s] == 0x00 || buf[s] == 0xFF); s++) ;
         for (e = len - 1; e >= 0 && (buf[e] == 0x00 || buf[e] == 0xFF); e--) ;
 
-        if (s >= len || e < 0) return null;
+        if (s >= len || e < 0) return String.Empty;
 
         var str = Encoding.GetString(buf, s, e - s + 1);
         if (TrimZero && str != null) str = str.Trim('\0');
 
-        return str;
+        return str ?? String.Empty;
     }
     #endregion
 
-    #region 跟踪日志
-    ///// <summary>使用跟踪流。实际上是重新包装一次Stream，必须在设置Stream后，使用之前</summary>
-    //public virtual void EnableTrace()
-    //{
-    //    var stream = Stream;
-    //    if (stream is null or TraceStream) return;
+    #region 辅助
+#if NETCOREAPP || NETSTANDARD2_1
+    /// <summary>从流读取到 Span（BCL 直读）</summary>
+    /// <param name="stream">目标流</param>
+    /// <param name="span">目标字节数组</param>
+    /// <returns>实际读取的字节数</returns>
+    private static Int32 ReadToSpan(Stream stream, Span<Byte> span) => stream.Read(span);
+#else
+    /// <summary>从流读取到 Span。低 TFM 无 Stream.Read(Span&lt;Byte&gt;) 重载，经池化缓冲中转</summary>
+    /// <param name="stream">目标流</param>
+    /// <param name="span">目标字节数组</param>
+    /// <returns>实际读取的字节数</returns>
+    private static Int32 ReadToSpan(Stream stream, Span<Byte> span)
+    {
+        using var buffer = Pool.Rent(span.Length);
+        var n = stream.Read(buffer, 0, span.Length);
+        if (n > 0) buffer.Span.Slice(0, n).CopyTo(span);
 
-    //    Stream = new TraceStream(stream) { Encoding = Encoding, IsLittleEndian = IsLittleEndian };
-    //}
+        return n;
+    }
+#endif
+
+    ///// <summary>是否已达到末尾</summary>
+    ///// <returns></returns>
+    //public Boolean EndOfStream() => Stream.Position >= Stream.Length;
+
+    /// <summary>检查剩余量是否足够</summary>
+    /// <param name="size"></param>
+    /// <returns></returns>
+    public Boolean CheckRemain(Int32 size) => Stream.Position + size <= Stream.Length;
+
+    /// <summary>通过SpanReader读取ISpanSerializable对象，并同步流位置</summary>
+    /// <param name="target">目标对象</param>
+    private void ReadSpanSerializable(ISpanSerializable target)
+    {
+        if (!Stream.CanSeek)
+        {
+            // 不支持Seek的流直接使用流模式。
+            // 注意：SpanReader可能批量预读多余字节导致流位置超前，仅适用于整帧全部交由ISpanSerializable处理的场景
+            // 以 ref 传给 Read，不能用 using 变量声明，显式 try/finally 归还扩容借出的池缓冲
+            var reader0 = new SpanReader(Stream)
+            {
+                IsLittleEndian = IsLittleEndian,
+                EncodeInt = EncodeInt,
+                FullTime = FullTime,
+            };
+            try
+            {
+                target.Read(ref reader0);
+                // 总消费量 = 已缓入span的总字节数 - 未消费剩余量；_total为私有，用 Available 间接推算
+                // reader0.Position 仅在未触发二次EnsureSpace时等于总消费量，此处以此为近似值
+                Total += reader0.Position;
+            }
+            finally
+            {
+                reader0.Dispose();
+            }
+
+            return;
+        }
+
+        var startPos = Stream.Position;
+        var reader = new SpanReader(Stream) { IsLittleEndian = IsLittleEndian };
+        try
+        {
+            target.Read(ref reader);
+
+            // SpanReader流模式可能预读了多余字节，需要回退未消费部分
+            var available = reader.Available;
+            if (available > 0) Stream.Seek(-available, SeekOrigin.Current);
+            Total += (Int32)(Stream.Position - startPos);
+        }
+        finally
+        {
+            reader.Dispose();
+        }
+    }
     #endregion
 
     #region 快捷方法
@@ -507,9 +980,9 @@ public class Binary : FormatterBase, IBinary
     /// <param name="stream">数据流</param>
     /// <param name="encodeInt">使用7位编码整数</param>
     /// <returns></returns>
-    public static T FastRead<T>(Stream stream, Boolean encodeInt = true)
+    public static T? FastRead<T>(Stream stream, Boolean encodeInt = true)
     {
-        var bn = new Binary() { Stream = stream, EncodeInt = encodeInt };
+        var bn = new Binary(stream) { EncodeInt = encodeInt };
         return bn.Read<T>();
     }
 
@@ -517,15 +990,20 @@ public class Binary : FormatterBase, IBinary
     /// <param name="value">对象</param>
     /// <param name="encodeInt">使用7位编码整数</param>
     /// <returns></returns>
-    public static Packet FastWrite(Object value, Boolean encodeInt = true)
+    public static IPacket FastWrite(Object value, Boolean encodeInt = true)
     {
         // 头部预留8字节，方便加协议头
         var bn = new Binary { EncodeInt = encodeInt };
         bn.Stream.Seek(8, SeekOrigin.Current);
         bn.Write(value);
 
-        var buf = bn.GetBytes();
-        return new Packet(buf, 8, buf.Length - 8);
+        //var buf = bn.GetBytes();
+        //return new ArrayPacket(buf, 8, buf.Length - 8);
+
+        bn.Stream.Position = 8;
+
+        // 包装为数据包，直接窃取内存流内部的缓冲区
+        return new ArrayPacket(bn.Stream);
     }
 
     /// <summary>快速写入</summary>
@@ -533,14 +1011,15 @@ public class Binary : FormatterBase, IBinary
     /// <param name="stream">目标数据流</param>
     /// <param name="encodeInt">使用7位编码整数</param>
     /// <returns></returns>
-    public static void FastWrite(Object value, Stream stream, Boolean encodeInt = true)
+    public static Int64 FastWrite(Object value, Stream stream, Boolean encodeInt = true)
     {
-        var bn = new Binary
+        var bn = new Binary(stream)
         {
-            Stream = stream,
             EncodeInt = encodeInt,
         };
         bn.Write(value);
+
+        return bn.Total;
     }
     #endregion
 }

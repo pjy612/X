@@ -1,15 +1,12 @@
-﻿using System;
-using System.IO;
-
-namespace NewLife.Security;
+﻿namespace NewLife.Security;
 
 /// <summary>CRC16校验</summary>
 public sealed class Crc16
 {
     #region 数据表
     /// <summary>CRC16表</summary>
-    static readonly UInt16[] CrcTable = new UInt16[256]
-    {      
+    static readonly UInt16[] CrcTable =
+    [
         /* CRC16 余式表 */
         0x0000,0x1021,0x2042,0x3063,0x4084,0x50A5,0x60C6,0x70E7,
         0x8108,0x9129,0xA14A,0xB16B,0xC18C,0xD1AD,0xE1CE,0xF1EF,
@@ -43,10 +40,11 @@ public sealed class Crc16
         0x7C26,0x6C07,0x5C64,0x4C45,0x3CA2,0x2C83,0x1CE0,0x0CC1,
         0xEF1F,0xFF3E,0xCF5D,0xDF7C,0xAF9B,0xBFBA,0x8FD9,0x9FF8,
         0x6E17,0x7E36,0x4E55,0x5E74,0x2E93,0x3EB2,0x0ED1,0x1EF0
-    };
+    ];
 
+    const UInt16 CrcSeed = 0xFFFF;
     /// <summary>校验值</summary>
-    public UInt16 Value { get; set; } = 0xFFFF;
+    public UInt16 Value { get; set; } = CrcSeed;
     #endregion
 
     /// <summary>重置清零</summary>
@@ -58,7 +56,8 @@ public sealed class Crc16
     /// </param>
     public Crc16 Update(Int16 value)
     {
-        Value = (UInt16)((Value << 8) ^ CrcTable[((Value >> 8) ^ value)]);
+        // 只取低8位作为索引，否则 value 超出 0~255 时查表越界（文档声明取低8位）
+        Value = (UInt16)((Value << 8) ^ CrcTable[((Value >> 8) ^ value) & 0xFF]);
 
         return this;
     }
@@ -71,11 +70,11 @@ public sealed class Crc16
     public Crc16 Update(Byte[] buffer, Int32 offset = 0, Int32 count = -1)
     {
         if (buffer == null) throw new ArgumentNullException(nameof(buffer));
-        if (count <= 0) count = buffer.Length;
-        if (offset < 0 || offset + count > buffer.Length) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (count < 0) count = buffer.Length - offset;
+        // 用减法形式避免 offset+count 溢出后绕过校验导致越界读
+        if (offset < 0 || offset > buffer.Length || count < 0 || count > buffer.Length - offset) throw new ArgumentOutOfRangeException(nameof(offset));
 
-        var crc = Value;
-        crc ^= crc;
+        var crc = (UInt16)(Value ^ CrcSeed);
         for (var i = 0; i < count; i++)
         {
             crc = (UInt16)((crc << 8) ^ CrcTable[(crc >> 8 ^ buffer[offset + i]) & 0xFF]);
@@ -85,28 +84,37 @@ public sealed class Crc16
         return this;
     }
 
-    /// <summary>添加数据流进行校验，不查表计算  CRC-16 x16+x15+x2+1 8005 IBM SDLC</summary>
+    /// <summary>添加数据区进行检验</summary>
+    /// <param name="buffer"></param>
+    /// <returns></returns>
+    public Crc16 Update(ReadOnlySpan<Byte> buffer)
+    {
+        var crc = (UInt16)(Value ^ CrcSeed);
+        for (var i = 0; i < buffer.Length; i++)
+        {
+            crc = (UInt16)((crc << 8) ^ CrcTable[(crc >> 8 ^ buffer[i]) & 0xFF]);
+        }
+        Value = crc;
+
+        return this;
+    }
+
+    /// <summary>添加数据流进行校验，与字节数组版本一致使用查表法（CRC16-CCITT 0x1021）</summary>
     /// <param name="stream"></param>
     /// <param name="count">数量</param>
     public Crc16 Update(Stream stream, Int64 count = -1)
     {
         if (stream == null) throw new ArgumentNullException(nameof(stream));
-        if (count <= 0) count = Int64.MaxValue;
+        //if (count < 0) count = stream.Length - stream.Position;
+        if (count < 0) count = Int64.MaxValue;
 
-        var crc = Value;
+        var crc = (UInt16)(Value ^ CrcSeed);
         while (--count >= 0)
         {
             var b = stream.ReadByte();
             if (b == -1) break;
 
-            crc ^= (Byte)b;
-            for (var i = 0; i < 8; i++)
-            {
-                if ((crc & 0x0001) != 0)
-                    crc = (UInt16)((crc >> 1) ^ 0xa001);
-                else
-                    crc = (UInt16)(crc >> 1);
-            }
+            crc = (UInt16)((crc << 8) ^ CrcTable[(crc >> 8 ^ b) & 0xFF]);
         }
         Value = crc;
 
@@ -122,6 +130,16 @@ public sealed class Crc16
     {
         var crc = new Crc16();
         crc.Update(buf, offset, count);
+        return crc.Value;
+    }
+
+    /// <summary>计算校验码</summary>
+    /// <param name="buffer"></param>
+    /// <returns></returns>
+    public static UInt16 Compute(ReadOnlySpan<Byte> buffer)
+    {
+        var crc = new Crc16();
+        crc.Update(buffer);
         return crc.Value;
     }
 
@@ -146,22 +164,26 @@ public sealed class Crc16
     /// <param name="position">如果大于等于0，则表示从该位置开始计算</param>
     /// <param name="count">字节数偏移量，一般用负数表示</param>
     /// <returns></returns>
-    public static UInt16 Compute(Stream stream, Int64 position = -1, Int32 count = -1)
+    public static UInt16 Compute(Stream stream, Int64 position, Int32 count)
     {
         if (position >= 0)
         {
             if (count > 0) count = -count;
-            count += (Int32)(stream.Position - position);
+            // Int64 累加避免大流（>2GB）回绕，结果钳制回 Int32
+            var n = (Int64)count + (stream.Position - position);
+            count = n > Int32.MaxValue ? Int32.MaxValue : (Int32)n;
             stream.Position = position;
         }
 
         var crc = new Crc16();
+        // count 为 0 时无需计算，返回初始校验值，避免 Update 误把整段流都算进去
+        if (count == 0) return crc.Value;
         crc.Update(stream, count);
         return crc.Value;
     }
 
     #region Modbus
-    private static readonly UInt16[] crc_ta = new UInt16[16] { 0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401, 0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400, };
+    private static readonly UInt16[] crc_ta = [0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401, 0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400,];
 
     /// <summary>Modbus版Crc校验</summary>
     /// <param name="data"></param>
@@ -175,9 +197,12 @@ public sealed class Crc16
         UInt16 u = 0xFFFF;
         Byte b;
 
-        if (count == 0) count = data.Length - offset;
+        if (count <= 0) count = data.Length - offset;
+        if (offset < 0 || offset > data.Length) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (count < 0 || offset + count > data.Length) throw new ArgumentOutOfRangeException(nameof(count));
 
-        for (var i = offset; i < count; i++)
+        // 循环上界必须是 offset + count，原实现 i < count 在 offset > 0 时只校验部分字节甚至完全不校验
+        for (var i = offset; i < offset + count; i++)
         {
             b = data[i];
             u = (UInt16)(crc_ta[(b ^ u) & 15] ^ (u >> 4));

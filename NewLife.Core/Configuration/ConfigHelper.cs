@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using NewLife.Reflection;
 using NewLife.Serialization;
@@ -7,15 +8,16 @@ using NewLife.Serialization;
 namespace NewLife.Configuration;
 
 /// <summary>配置助手</summary>
+/// <remarks>提供配置树的查找、添加和映射等扩展方法</remarks>
 public static class ConfigHelper
 {
     #region 扩展
-    /// <summary>查找配置项。可得到子级和配置</summary>
-    /// <param name="section"></param>
-    /// <param name="key"></param>
-    /// <param name="createOnMiss"></param>
-    /// <returns></returns>
-    public static IConfigSection Find(this IConfigSection section, String key, Boolean createOnMiss = false)
+    /// <summary>查找配置项</summary>
+    /// <param name="section">起始配置节</param>
+    /// <param name="key">键路径，冒号分隔</param>
+    /// <param name="createOnMiss">当不存在时是否自动创建</param>
+    /// <returns>返回匹配配置节；未找到且不创建时返回 null</returns>
+    public static IConfigSection? Find(this IConfigSection section, String key, Boolean createOnMiss = false)
     {
         if (key.IsNullOrEmpty()) return section;
 
@@ -27,12 +29,15 @@ public static class ConfigHelper
         // 逐级下钻
         for (var i = 0; i < ss.Length; i++)
         {
-            var cfg = sec.Childs?.FirstOrDefault(e => e.Key.EqualIgnoreCase(ss[i]));
+            var part = ss[i];
+            if (part.IsNullOrEmpty()) continue;
+
+            var cfg = sec.Childs?.FirstOrDefault(e => e.Key.EqualIgnoreCase(part));
             if (cfg == null)
             {
                 if (!createOnMiss) return null;
 
-                cfg = sec.AddChild(ss[i]);
+                cfg = sec.AddChild(part);
             }
 
             sec = cfg;
@@ -42,47 +47,50 @@ public static class ConfigHelper
     }
 
     /// <summary>添加子节点</summary>
-    /// <param name="section"></param>
-    /// <param name="key"></param>
-    /// <returns></returns>
+    /// <param name="section">父配置节</param>
+    /// <param name="key">子节点键名</param>
+    /// <returns>创建的子配置节</returns>
     public static IConfigSection AddChild(this IConfigSection section, String key)
     {
-        if (section == null) return null;
+        //if (section == null) return null;
 
         var cfg = new ConfigSection { Key = key };
-        if (section.Childs == null) section.Childs = new List<IConfigSection>();
+        section.Childs ??= [];
         section.Childs.Add(cfg);
 
         return cfg;
     }
 
     /// <summary>查找或添加子节点</summary>
-    /// <param name="section"></param>
-    /// <param name="key"></param>
-    /// <returns></returns>
+    /// <param name="section">父配置节</param>
+    /// <param name="key">子节点键名</param>
+    /// <returns>已存在或新建的子配置节</returns>
     public static IConfigSection GetOrAddChild(this IConfigSection section, String key)
     {
-        if (section == null) return null;
+        //if (section == null) return null;
 
         var cfg = section.Childs?.FirstOrDefault(e => e.Key.EqualIgnoreCase(key));
         if (cfg != null) return cfg;
 
         cfg = new ConfigSection { Key = key };
-        if (section.Childs == null) section.Childs = new List<IConfigSection>();
+        section.Childs ??= [];
         section.Childs.Add(cfg);
 
         return cfg;
     }
 
-    /// <summary>设置节点值。格式化友好字符串</summary>
-    /// <param name="section"></param>
-    /// <param name="value"></param>
-    internal static void SetValue(this IConfigSection section, Object value)
+    /// <summary>设置节点值</summary>
+    /// <remarks>格式化友好字符串，DateTime、Boolean、Enum 等特殊处理</remarks>
+    /// <param name="section">目标配置节</param>
+    /// <param name="value">待设置的值</param>
+    internal static void SetValue(this IConfigSection section, Object? value)
     {
         if (value is DateTime dt)
             section.Value = dt.ToFullString();
         else if (value is Boolean b)
-            section.Value = b.ToString().ToLower();
+            section.Value = b.ToString().ToLowerInvariant();
+        else if (value is Enum)
+            section.Value = value.ToString();
         else
             section.Value = value?.ToString();
     }
@@ -95,19 +103,13 @@ public static class ConfigHelper
     /// <param name="provider">提供者</param>
     public static void MapTo(this IConfigSection section, Object model, IConfigProvider provider)
     {
-        if (section == null || section.Childs == null || section.Childs.Count == 0 || model == null) return;
+        var childs = section.Childs?.ToArray();
+        if (childs == null || childs.Length == 0 || model == null) return;
 
         // 支持字典
-        if (model is IDictionary<String, Object> dic)
+        if (model is IDictionary<String, Object?> dic)
         {
-            foreach (var cfg in section.Childs)
-            {
-                dic[cfg.Key] = cfg.Value;
-
-                if (cfg.Childs != null && cfg.Childs.Count > 0)
-                    dic[cfg.Key] = cfg.Childs;
-            }
-
+            MapToDictionary(childs, dic);
             return;
         }
 
@@ -117,15 +119,12 @@ public static class ConfigHelper
         foreach (var pi in model.GetType().GetProperties(true))
         {
             if (!pi.CanRead || !pi.CanWrite) continue;
-            //if (pi.GetIndexParameters().Length > 0) continue;
-            //if (pi.GetCustomAttribute<IgnoreDataMemberAttribute>(false) != null) continue;
-            //if (pi.GetCustomAttribute<XmlIgnoreAttribute>() != null) continue;
 
             var name = SerialHelper.GetName(pi);
             if (name.EqualIgnoreCase("ConfigFile", "IsNew")) continue;
 
             prv?.UseKey(name);
-            var cfg = section.Childs?.FirstOrDefault(e => e.Key.EqualIgnoreCase(name));
+            var cfg = childs.FirstOrDefault(e => e.Key.EqualIgnoreCase(name));
             if (cfg == null)
             {
                 prv?.MissKey(name);
@@ -137,53 +136,149 @@ public static class ConfigHelper
         }
     }
 
+    /// <summary>映射配置子节点到字典</summary>
+    /// <param name="childs">子节点数组</param>
+    /// <param name="dic">目标字典</param>
+    private static void MapToDictionary(IConfigSection[] childs, IDictionary<String, Object?> dic)
+    {
+        foreach (var cfg in childs)
+        {
+            if (cfg.Key.IsNullOrEmpty()) continue;
+
+            // 如有子级，则优先返回子级集合，否则返回值
+            dic[cfg.Key] = (cfg.Childs != null && cfg.Childs.Count > 0) ? cfg.Childs : cfg.Value;
+        }
+    }
+
+    /// <summary>映射配置节到对象属性</summary>
+    /// <param name="cfg">源配置节</param>
+    /// <param name="model">目标模型</param>
+    /// <param name="pi">属性信息</param>
+    /// <param name="provider">配置提供者</param>
     private static void MapToObject(IConfigSection cfg, Object model, PropertyInfo pi, IConfigProvider provider)
     {
         // 分别处理基本类型、数组类型、复杂类型
-        if (pi.PropertyType.GetTypeCode() != TypeCode.Object)
+        if (pi.PropertyType.IsBaseType())
         {
-            pi.SetValue(model, cfg.Value.ChangeType(pi.PropertyType), null);
+            MemberAccessorTable.SetValue(model, model.GetType(), pi, cfg.Value);
         }
         else if (cfg.Childs != null)
         {
-            if (pi.PropertyType.As<IList>())
+            if (pi.PropertyType.As<IList>() || pi.PropertyType.As(typeof(IList<>)))
             {
                 if (pi.PropertyType.IsArray)
                     MapToArray(cfg, model, pi, provider);
                 else
                     MapToList(cfg, model, pi, provider);
             }
+            else if (pi.PropertyType.As<IDictionary>() || pi.PropertyType.As(typeof(IDictionary<,>)))
+            {
+                MapToDictionaryProperty(cfg, model, pi, provider);
+            }
             else
             {
-                // 复杂类型需要递归处理
-                var val = pi.GetValue(model, null);
-                if (val == null)
-                {
-                    // 如果有无参构造函数，则实例化一个
-                    var ctor = pi.PropertyType.GetConstructor(new Type[0]);
-                    if (ctor != null)
-                    {
-                        val = ctor.Invoke(null);
-                        pi.SetValue(model, val, null);
-                    }
-                }
-
-                // 递归映射
-                if (val != null) MapTo(cfg, val, provider);
+                MapToComplexObject(cfg, model, pi, provider);
             }
         }
     }
 
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "配置绑定目标为运行时模型属性类型（配置数据驱动）；直调 MapTo 须先由泛型入口（Load<T>/Bind<T>/Save<T>）保留类型元数据，见 Doc/AOT兼容性分析.md §5")]
+    private static void MapToDictionaryProperty(IConfigSection cfg, Object model, PropertyInfo pi, IConfigProvider provider)
+    {
+        if (cfg.Childs == null) return;
+
+        var dict = MemberAccessorTable.GetValue(model, model.GetType(), pi) as IDictionary;
+        if (dict == null)
+        {
+            var obj = !pi.PropertyType.IsInterface ? pi.PropertyType.CreateInstance() : typeof(Dictionary<,>).MakeGenericType(pi.PropertyType.GetGenericArguments()).CreateInstance();
+            dict = obj as IDictionary;
+            if (dict == null) return;
+
+            MemberAccessorTable.SetValue(model, model.GetType(), pi, dict);
+        }
+
+        // 映射前清空原有数据
+        dict.Clear();
+
+        var keyType = typeof(String);
+        var valType = typeof(String);
+        if (pi.PropertyType.IsGenericType)
+        {
+            var args = pi.PropertyType.GetGenericArguments();
+            if (args.Length >= 2)
+            {
+                keyType = args[0];
+                valType = args[1];
+            }
+        }
+
+        // 约定：<Settings><token>xxx</token><mode>yyy</mode></Settings>
+        foreach (var item in cfg.Childs.ToArray())
+        {
+            if (item.Key.IsNullOrEmpty()) continue;
+
+            var k = item.Key.ChangeType(keyType);
+            Object? v;
+            if (item.Childs != null)
+            {
+                // 复杂对象值：递归映射
+                v = valType.CreateInstance();
+                if (v != null)
+                    MapTo(item, v, provider);
+            }
+            else
+            {
+                v = item.Value?.ChangeType(valType);
+            }
+
+            if (k != null) dict[k] = v;
+        }
+    }
+
+    /// <summary>映射配置节到复杂对象属性</summary>
+    /// <param name="cfg">源配置节</param>
+    /// <param name="model">目标模型</param>
+    /// <param name="pi">属性信息</param>
+    /// <param name="provider">配置提供者</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "配置绑定目标为运行时模型属性类型（配置数据驱动）；直调 MapTo 须先由泛型入口（Load<T>/Bind<T>/Save<T>）保留类型元数据，见 Doc/AOT兼容性分析.md §5")]
+    private static void MapToComplexObject(IConfigSection cfg, Object model, PropertyInfo pi, IConfigProvider provider)
+    {
+        var val = MemberAccessorTable.GetValue(model, model.GetType(), pi);
+        if (val == null)
+        {
+            // 如果有无参构造函数，则实例化一个
+            var ctor = pi.PropertyType.GetConstructor(Type.EmptyTypes);
+            if (ctor != null)
+            {
+                val = ctor.Invoke(null);
+                MemberAccessorTable.SetValue(model, model.GetType(), pi, val);
+            }
+        }
+
+        // 递归映射
+        if (val != null) MapTo(cfg, val, provider);
+    }
+
+    /// <summary>映射配置节到数组属性</summary>
+    /// <param name="section">源配置节</param>
+    /// <param name="model">目标模型</param>
+    /// <param name="pi">属性信息</param>
+    /// <param name="provider">配置提供者</param>
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "配置绑定目标为运行时模型属性类型（配置数据驱动）；直调 MapTo 须先由泛型入口（Load<T>/Bind<T>/Save<T>）保留类型元数据，见 Doc/AOT兼容性分析.md §5")]
     private static void MapToArray(IConfigSection section, Object model, PropertyInfo pi, IConfigProvider provider)
     {
+        if (section.Childs == null) return;
+
         var elementType = pi.PropertyType.GetElementTypeEx();
+        if (elementType == null) return;
+
         var count = section.Childs.Count;
 
-        // 实例化数组
-        if (pi.GetValue(model, null) is not Array arr || arr.Length == 0)
+        // 实例化或调整数组，按配置元素数量精确创建，避免保留旧数据
+        if (MemberAccessorTable.GetValue(model, model.GetType(), pi) is not Array arr || arr.Length != count)
         {
             arr = Array.CreateInstance(elementType, count);
-            pi.SetValue(model, arr, null);
+            MemberAccessorTable.SetValue(model, model.GetType(), pi, arr);
         }
 
         // 逐个映射
@@ -191,79 +286,101 @@ public static class ConfigHelper
         {
             var sec = section.Childs[i];
 
-            // 基元类型
-            if (elementType.GetTypeCode() != TypeCode.Object)
+            // 基元类型或可直接转换的简单类型
+            if (elementType.IsBaseType())
             {
-                if (sec.Key == elementType.Name)
-                {
-                    arr.SetValue(sec.Value.ChangeType(elementType), i);
-                }
+                // 放宽 Key 限制，优先使用值进行转换
+                arr.SetValue(sec.Value?.ChangeType(elementType), i);
             }
             else
             {
                 var val = elementType.CreateInstance();
-                MapTo(sec, val, provider);
+                if (val != null) MapTo(sec, val, provider);
                 arr.SetValue(val, i);
             }
         }
     }
 
+    /// <summary>映射配置节到列表属性</summary>
+    /// <param name="section">源配置节</param>
+    /// <param name="model">目标模型</param>
+    /// <param name="pi">属性信息</param>
+    /// <param name="provider">配置提供者</param>
+    [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "配置绑定目标为运行时模型属性类型（配置数据驱动）；直调 MapTo 须先由泛型入口（Load<T>/Bind<T>/Save<T>）保留类型元数据，见 Doc/AOT兼容性分析.md §5")]
     private static void MapToList(IConfigSection section, Object model, PropertyInfo pi, IConfigProvider provider)
     {
         var elementType = pi.PropertyType.GetElementTypeEx();
+        if (elementType == null) return;
 
-        // 实例化列表
-        if (pi.GetValue(model, null) is not IList list)
+        // 确保存在列表实例
+        IList list;
+        var current = MemberAccessorTable.GetValue(model, model.GetType(), pi);
+        if (current is IList l)
+        {
+            list = l;
+            // 映射前清空原有数据
+            list.Clear();
+        }
+        else
         {
             var obj = !pi.PropertyType.IsInterface ?
                 pi.PropertyType.CreateInstance() :
                 typeof(List<>).MakeGenericType(elementType).CreateInstance();
 
-            list = obj as IList;
-            if (list == null) return;
+            if (obj is not IList newList) return;
 
-            pi.SetValue(model, list, null);
+            MemberAccessorTable.SetValue(model, model.GetType(), pi, newList);
+            list = newList;
         }
 
-        // 映射前清空原有数据
-        list.Clear();
+        if (section.Childs == null) return;
 
         // 逐个映射
-        for (var i = 0; i < section.Childs.Count; i++)
+        var childs = section.Childs.ToArray();
+        for (var i = 0; i < childs.Length; i++)
         {
-            var val = elementType.CreateInstance();
-            if (elementType.GetTypeCode() != TypeCode.Object)
+            Object? val = null;
+            if (elementType.IsBaseType())
             {
-                val = section.Childs[i].Value;
+                // 将字符串值转换为目标元素类型
+                val = childs[i].Value?.ChangeType(elementType);
             }
             else
             {
-                MapTo(section.Childs[i], val, provider);
-                //list[i] = val;
+                val = elementType.CreateInstance();
+                if (val != null) MapTo(childs[i], val, provider);
             }
             list.Add(val);
         }
     }
 
+    /// <summary>本地化配置注释</summary>
+    /// <param name="comment">源文注释</param>
+    /// <returns>本地化注释；未显式设置开发者语言时返回原文</returns>
+    /// <remarks>
+    /// 配置文件是持久化产物，只跟随 <see cref="Localization.LogCulture"/> 或显式设置的
+    /// <see cref="Localization.Culture"/>，不跟随 <see cref="System.Globalization.CultureInfo.CurrentUICulture"/>，
+    /// 避免请求语言导致注释漂移。
+    /// </remarks>
+    public static String? LocalizeComment(this String? comment)
+    {
+        if (comment.IsNullOrEmpty()) return comment;
+
+        var culture = Localization.LogCulture ?? Localization.Culture;
+        return culture == null ? comment : Localization.Translate(culture, comment);
+    }
+
     /// <summary>从实例公有属性映射到配置树</summary>
-    /// <param name="section"></param>
-    /// <param name="model"></param>
+    /// <param name="section">目标配置节</param>
+    /// <param name="model">模型实例</param>
     public static void MapFrom(this IConfigSection section, Object model)
     {
         if (section == null) return;
 
         // 支持字典
-        if (model is IDictionary<String, Object> dic)
+        if (model is IDictionary<String, Object?> dic)
         {
-            foreach (var item in dic)
-            {
-                var cfg = section.GetOrAddChild(item.Key);
-                var value = item.Value;
-
-                // 分别处理基本类型、数组类型、复杂类型
-                if (value != null) MapObject(section, cfg, value, value.GetType());
-            }
-
+            MapFromDictionary(section, dic);
             return;
         }
 
@@ -271,9 +388,6 @@ public static class ConfigHelper
         foreach (var pi in model.GetType().GetProperties(true))
         {
             if (!pi.CanRead || !pi.CanWrite) continue;
-            //if (pi.GetIndexParameters().Length > 0) continue;
-            //if (pi.GetCustomAttribute<IgnoreDataMemberAttribute>(false) != null) continue;
-            //if (pi.GetCustomAttribute<XmlIgnoreAttribute>() != null) continue;
 
             var name = SerialHelper.GetName(pi);
             if (name.EqualIgnoreCase("ConfigFile", "IsNew")) continue;
@@ -282,47 +396,122 @@ public static class ConfigHelper
             var cfg = section.GetOrAddChild(name);
 
             // 反射获取属性值
-            var value = pi.GetValue(model, null);
-            var att = pi.GetCustomAttribute<DescriptionAttribute>();
-            cfg.Comment = att?.Description;
+            var value = MemberAccessorTable.GetValue(model, model.GetType(), pi);
+            cfg.Comment = pi.GetCustomAttribute<DescriptionAttribute>()?.Description;
             if (cfg.Comment.IsNullOrEmpty())
-            {
-                var att2 = pi.GetCustomAttribute<DisplayNameAttribute>();
-                cfg.Comment = att2?.DisplayName;
-            }
+                cfg.Comment = pi.GetCustomAttribute<DisplayNameAttribute>()?.DisplayName;
 
-            //!! 即使模型字段值为空，也必须拷贝，否则修改设置时，无法清空某字段
-            //if (val == null) continue;
-
+            // 即使模型字段值为空，也必须拷贝，否则修改设置时，无法清空某字段
             // 分别处理基本类型、数组类型、复杂类型
             MapObject(section, cfg, value, pi.PropertyType);
         }
     }
 
-    private static void MapObject(IConfigSection section, IConfigSection cfg, Object val, Type type)
+    /// <summary>从字典映射到配置节</summary>
+    /// <param name="section">目标配置节</param>
+    /// <param name="dic">源字典</param>
+    private static void MapFromDictionary(IConfigSection section, IDictionary<String, Object?> dic)
+    {
+        foreach (var item in dic)
+        {
+            var cfg = section.GetOrAddChild(item.Key);
+            var value = item.Value;
+
+            // 分别处理基本类型、数组类型、复杂类型
+            if (value != null) MapObject(section, cfg, value, value.GetType());
+        }
+    }
+
+    /// <summary>映射单个对象到配置节</summary>
+    /// <param name="section">父配置节</param>
+    /// <param name="cfg">目标配置节</param>
+    /// <param name="val">源值</param>
+    /// <param name="type">值类型</param>
+    private static void MapObject(IConfigSection section, IConfigSection cfg, Object? val, Type type)
     {
         // 分别处理基本类型、数组类型、复杂类型
-        if (type.GetTypeCode() != TypeCode.Object)
+        if (type.IsBaseType())
         {
             cfg.SetValue(val);
         }
-        else if (type.As<IList>())
+        else if (type.As<IList>() || type.As(typeof(IList<>)))
         {
-            if (val is IList list) MapArray(section, cfg, list, type.GetElementTypeEx());
+            if (val is IList list)
+            {
+                var elementType = type.GetElementTypeEx();
+                if (elementType != null) MapArray(cfg, list, elementType);
+            }
+        }
+        else if (type.As<IDictionary>() || type.As(typeof(IDictionary<,>)))
+        {
+            if (val is IDictionary dic)
+                MapDictionary(cfg, dic, type);
+            else
+                cfg.Childs = null;
         }
         else if (val != null)
         {
             // 递归映射
             MapFrom(cfg, val);
         }
+        else
+        {
+            cfg.Childs = null;
+        }
     }
 
-    private static void MapArray(IConfigSection section, IConfigSection cfg, IList list, Type elementType)
+    private static void MapDictionary(IConfigSection cfg, IDictionary dic, Type dictType)
     {
-        // 为了避免数组元素叠加，干掉原来的
-        section.Childs.Remove(cfg);
-        cfg = new ConfigSection { Key = cfg.Key, Childs = new List<IConfigSection>(), Comment = cfg.Comment };
-        section.Childs.Add(cfg);
+        cfg.Childs ??= [];
+        if (cfg.Childs.Count > 0) cfg.Childs.Clear();
+
+        var keyType = typeof(String);
+        var valType = typeof(String);
+        if (dictType.IsGenericType)
+        {
+            var args = dictType.GetGenericArguments();
+            if (args.Length >= 2)
+            {
+                keyType = args[0];
+                valType = args[1];
+            }
+        }
+
+        foreach (var obj in dic)
+        {
+            // 防御性跳过非字典项（含空项），避免潜在空拆箱
+            if (obj is not DictionaryEntry item) continue;
+            if (item.Key == null) continue;
+
+            var key = item.Key.ChangeType<String>();
+            if (key.IsNullOrEmpty()) continue;
+
+            var cfg2 = cfg.AddChild(key);
+
+            if (item.Value == null)
+            {
+                cfg2.Childs = null;
+                cfg2.Value = null;
+                continue;
+            }
+
+            // 复杂对象值：递归映射；简单值：写 Value
+            if (valType.IsBaseType() || item.Value.GetType().IsBaseType())
+                cfg2.SetValue(item.Value);
+            else
+                MapFrom(cfg2, item.Value);
+        }
+    }
+
+    /// <summary>映射列表到配置节</summary>
+    /// <param name="cfg">目标配置节</param>
+    /// <param name="list">源列表</param>
+    /// <param name="elementType">元素类型</param>
+    private static void MapArray(IConfigSection cfg, IList list, Type elementType)
+    {
+        // 直接重用并清空当前配置节的子节点，避免顺序漂移并保留注释
+        cfg.Childs ??= [];
+        if (cfg.Childs.Count > 0) cfg.Childs.Clear();
 
         // 数组元素是没有key的集合
         foreach (var item in list)
@@ -332,11 +521,12 @@ public static class ConfigHelper
             var cfg2 = cfg.AddChild(elementType.Name);
 
             // 分别处理基本类型和复杂类型
-            if (item.GetType().GetTypeCode() != TypeCode.Object)
+            if (item.GetType().IsBaseType())
                 cfg2.SetValue(item);
             else
                 MapFrom(cfg2, item);
         }
     }
+
     #endregion
 }

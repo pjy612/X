@@ -1,4 +1,5 @@
 ﻿#if NET7_0_OR_GREATER
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
@@ -8,6 +9,8 @@ using System.Xml.Serialization;
 namespace NewLife.Serialization;
 
 /// <summary>数据成员解析器。让System.Text.Json增加对DataMemberAttribute和IgnoreDataMemberAttribute的支持</summary>
+[UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "继承默认解析器以叠加 [DataMember] 成员映射；解析依赖反射元数据，属动态能力边界，元数据由 SystemJson 上下文或调用方负责保留")]
+[UnconditionalSuppressMessage("AOT", "IL3050", Justification = "继承默认解析器以叠加 [DataMember] 成员映射；解析依赖反射元数据，属动态能力边界，元数据由 SystemJson 上下文或调用方负责保留")]
 public class DataMemberResolver : DefaultJsonTypeInfoResolver
 {
     /// <summary>默认解析器实例</summary>
@@ -38,6 +41,8 @@ public class DataMemberResolver : DefaultJsonTypeInfoResolver
         foreach (var propertyInfo in typeInfo.Properties)
         {
             var provider = propertyInfo.AttributeProvider;
+            if (provider == null) continue;
+
             if (provider.IsDefined(typeof(IgnoreDataMemberAttribute), true) ||
                 provider.IsDefined(typeof(XmlIgnoreAttribute), false))
             {
@@ -45,11 +50,10 @@ public class DataMemberResolver : DefaultJsonTypeInfoResolver
                 propertyInfo.Get = null;
                 propertyInfo.Set = null;
             }
-            else
+            else if (provider is PropertyInfo pi)
             {
-                var attr = provider.GetCustomAttributes(typeof(DataMemberAttribute), false)?.FirstOrDefault() as DataMemberAttribute;
-                if (attr != null && !attr.Name.IsNullOrEmpty())
-                    propertyInfo.Name = attr.Name;
+                var name = SerialHelper.GetName(pi);
+                if (name != pi.Name) propertyInfo.Name = name;
             }
         }
     }
